@@ -191,19 +191,36 @@ class SIPWorker:
         self.current_session_id = session_id
         loop = asyncio.get_running_loop()
 
-        try:
-            transport, protocol = await loop.create_datagram_endpoint(
-                lambda: RTPProtocol(session_id),
-                local_addr=('0.0.0.0', rtp_port)
-            )
-        except OSError as e:
-            if e.errno == 98:
-                log_info(f"RTP порт {rtp_port} уже открыт, пропускаем повторный bind.")
-                return
-            else:
-                log_error(f"Ошибка открытия RTP сокета: {e}")
-                raise e
-      
+        # Если сессия уже открыта — обновляем только адрес назначения для re-INVITE
+        if self.active_rtp_transport and not self.active_rtp_transport.is_closing():
+            if remote_ip and remote_port and self.active_rtp_proto:
+                self.active_rtp_proto.remote_target = (remote_ip, remote_port)
+                log_info(f"RTP цель обновлена для re-INVITE: {remote_ip}:{remote_port}")
+            return
+
+        transport = None
+        protocol = None
+
+        # Ищем свободный порт по очереди, если rtp_port уже занят
+        for port in range(rtp_port, rtp_port + 50):
+            try:
+                transport, protocol = await loop.create_datagram_endpoint(
+                    lambda: RTPProtocol(session_id),
+                    local_addr=('0.0.0.0', port)
+                )
+                log_info(f"RTP Сессия открыта на порту {port}")
+                break
+            except OSError as e:
+                if e.errno == 98:  # Address already in use
+                    continue
+                else:
+                    log_error(f"Ошибка открытия RTP сокета: {e}")
+                    raise e
+
+        if not transport:
+            log_error("Не удалось найти свободный RTP порт")
+            return
+
         if remote_ip and remote_port:
             protocol.remote_target = (remote_ip, remote_port)
             log_info(f"RTP Цель зафиксирована из SDP: {remote_ip}:{remote_port}")
@@ -211,7 +228,6 @@ class SIPWorker:
         self.active_rtp_transport = transport
         self.active_rtp_proto = protocol
 
-        log_info(f"RTP Сессия открыта на порту {rtp_port}")
         asyncio.create_task(self.vad_and_dialog_loop())
 
     async def vad_and_dialog_loop(self):
