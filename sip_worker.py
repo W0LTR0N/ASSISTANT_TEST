@@ -116,11 +116,17 @@ class SIPProtocol(asyncio.DatagramProtocol):
             cseq_m = re.search(r'CSeq:\s*(.*)', msg, re.I)
             from_m = re.search(r'From:\s*(.*)', msg, re.I)
             to_m = re.search(r'To:\s*(.*)', msg, re.I)
+            via_m = re.search(r'Via:\s*(.*)', msg, re.I)
 
             call_id = call_id_m.group(1).strip() if call_id_m else "123"
             cseq = cseq_m.group(1).strip() if cseq_m else "1 INVITE"
             from_hdr = from_m.group(1).strip() if from_m else ""
             to_hdr = to_m.group(1).strip() if to_m else ""
+            via_hdr = via_m.group(1).strip() if via_m else f"Via: SIP/2.0/UDP {addr[0]}:{addr[1]}"
+
+            # Добавляем tag к To только если его там ещё нет
+            if ";tag=" not in to_hdr.lower():
+                to_hdr = f"{to_hdr};tag={random.randint(1000,9999)}"
 
             phone_m = re.search(r'sip:\+?(\d+)', from_hdr)
             phone = phone_m.group(1) if phone_m else "Неизвестный"
@@ -138,11 +144,12 @@ class SIPProtocol(asyncio.DatagramProtocol):
 
             sdp_body = self.worker.generate_sdp(rtp_port)
 
+            # Внимание: Via возвращаем ровно в том виде, в каком прислал Плюсофон!
             response = (
                 f"SIP/2.0 200 OK\r\n"
-                f"Via: SIP/2.0/UDP {addr[0]}:{addr[1]}\r\n"
+                f"Via: {via_hdr}\r\n"
                 f"From: {from_hdr}\r\n"
-                f"To: {to_hdr};tag={random.randint(1000,9999)}\r\n"
+                f"To: {to_hdr}\r\n"
                 f"Call-ID: {call_id}\r\n"
                 f"CSeq: {cseq}\r\n"
                 f"Contact: <sip:{self.worker.user}@{PUBLIC_IP}:{self.worker.port}>\r\n"
@@ -191,7 +198,6 @@ class SIPWorker:
         self.current_session_id = session_id
         loop = asyncio.get_running_loop()
 
-        # Если сессия уже открыта — обновляем только адрес назначения для re-INVITE
         if self.active_rtp_transport and not self.active_rtp_transport.is_closing():
             if remote_ip and remote_port and self.active_rtp_proto:
                 self.active_rtp_proto.remote_target = (remote_ip, remote_port)
@@ -201,7 +207,6 @@ class SIPWorker:
         transport = None
         protocol = None
 
-        # Ищем свободный порт по очереди, если rtp_port уже занят
         for port in range(rtp_port, rtp_port + 50):
             try:
                 transport, protocol = await loop.create_datagram_endpoint(
@@ -211,7 +216,7 @@ class SIPWorker:
                 log_info(f"RTP Сессия открыта на порту {port}")
                 break
             except OSError as e:
-                if e.errno == 98:  # Address already in use
+                if e.errno == 98:
                     continue
                 else:
                     log_error(f"Ошибка открытия RTP сокета: {e}")
