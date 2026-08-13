@@ -6,34 +6,47 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
-    url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+    url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
     headers = {
-        "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}"
+        "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
+        "x-folder-id": YANDEX_FOLDER_ID,
+        "Content-Type": "application/json"
     }
    
-    # Стандартный чистый Филипп без питч-акцентов и искусственных ускорений
-    data = {
+    payload = {
         "text": text,
-        "lang": "ru-RU",
-        "voice": "filipp",
-        "format": "lpcm",
-        "sampleRateHertz": "8000",
-        "folderId": YANDEX_FOLDER_ID
+        "outputAudioSpec": {
+            "containerAudioSpec": {
+                "containerAudioType": "RAW"
+            },
+            "pcmAudioSpec": {
+                "sampleRateHertz": 8000
+            }
+        },
+        "hints": [
+            {
+                "voice": "marat",  # Натуральный мужской голос
+                "role": "friendly"
+            },
+            {
+                "speed": 1.0
+            }
+        ]
     }
 
     timeout = aiohttp.ClientTimeout(total=3.0, connect=1.0)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, headers=headers, data=data) as response:
+            async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     pcm_data = await response.read()
-                    log_info(f"TTS Синтезировано PCM байт: {len(pcm_data)}")
+                    log_info(f"TTS v3 Премиум Синтезировано PCM байт: {len(pcm_data)}")
                     return pcm_data
                 else:
                     err_text = await response.text()
-                    log_error(f"TTS Ошибка [{response.status}]: {err_text}")
+                    log_error(f"TTS v3 Ошибка [{response.status}]: {err_text}")
                     return b""
     except Exception as e:
-        log_error(f"Исключение TTS: {e}")
+        log_error(f"Исключение TTS v3: {e}")
         return b""
