@@ -33,8 +33,12 @@ async def clear_session_context(session_id: str = "default"):
         del session_histories[session_id]
         log_info(f"Контекст сессии {session_id} очищен")
 
+async def get_session_history_formatted(session_id: str = "default"):
+    """Возвращает форматированную историю сессии для sip_worker.py"""
+    return session_histories.get(session_id, [])
+
 async def get_session_history(session_id: str = "default"):
-    """Возвращает историю сессии"""
+    """Дубликат функции получения истории"""
     return session_histories.get(session_id, [])
 
 async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
@@ -50,7 +54,7 @@ async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
     # Добавляем сообщение пользователя в историю
     session_histories[session_id].append({"role": "user", "content": text})
 
-    # Ограничиваем историю последними 6 сообщениями, чтобы не раздувать контекст
+    # Ограничиваем историю последними 6 сообщениями
     recent_history = session_histories[session_id][-6:]
 
     url = "https://api.vsegpt.ru/v1/chat/completions"
@@ -89,7 +93,6 @@ async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
         log_error(f"Исключение GPT: {e}")
         return "Да, слушаю вас. Назовите, пожалуйста, марку вашего автомобиля."
 
-# Дублирующая обертка на случай, если где-то вызывается get_gpt_response
 async def get_gpt_response(history_messages):
     if isinstance(history_messages, str):
         return await ask_yandex_gpt(history_messages)
