@@ -6,6 +6,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
+    # Официальный REST-эндпоинт Yandex SpeechKit API v3
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
     headers = {
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
@@ -13,6 +14,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         "Content-Type": "application/json"
     }
    
+    # Настройки нейросети v3: голос Марат, чистые 8000 Гц под телефонию
     payload = {
         "text": text,
         "outputAudioSpec": {
@@ -25,8 +27,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         },
         "hints": [
             {
-                "voice": "marat",  # Натуральный мужской голос
-                "role": "friendly"
+                "voice": "marat"
             },
             {
                 "speed": 1.0
@@ -34,14 +35,14 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         ]
     }
 
-    timeout = aiohttp.ClientTimeout(total=3.0, connect=1.0)
+    timeout = aiohttp.ClientTimeout(total=4.0, connect=1.0)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     pcm_data = await response.read()
-                    log_info(f"TTS v3 Премиум Синтезировано PCM байт: {len(pcm_data)}")
+                    log_info(f"TTS v3 Живой голос синтезирован PCM байт: {len(pcm_data)}")
                     return pcm_data
                 else:
                     err_text = await response.text()
