@@ -17,7 +17,7 @@ def log_info(msg: str):
 def log_error(msg: str):
     logger.error(msg)
 
-Core/sst_logic.py
+#Core/sst_logic.py
 
 import aiohttp
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
