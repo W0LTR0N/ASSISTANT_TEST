@@ -124,7 +124,6 @@ class SIPProtocol(asyncio.DatagramProtocol):
             to_hdr = to_m.group(1).strip() if to_m else ""
             via_hdr = via_m.group(1).strip() if via_m else f"Via: SIP/2.0/UDP {addr[0]}:{addr[1]}"
 
-            # Добавляем tag к To только если его там ещё нет
             if ";tag=" not in to_hdr.lower():
                 to_hdr = f"{to_hdr};tag={random.randint(1000,9999)}"
 
@@ -144,7 +143,6 @@ class SIPProtocol(asyncio.DatagramProtocol):
 
             sdp_body = self.worker.generate_sdp(rtp_port)
 
-            # Внимание: Via возвращаем ровно в том виде, в каком прислал Плюсофон!
             response = (
                 f"SIP/2.0 200 OK\r\n"
                 f"Via: {via_hdr}\r\n"
@@ -275,9 +273,13 @@ class SIPWorker:
                 silence_start_time = None
 
     async def stop_current_call(self):
-        if self.active_rtp_transport:
-            self.active_rtp_transport.close()
-            self.active_rtp_transport = None
+        # Защита от дублирования вызовов завершения
+        if not self.active_rtp_transport:
+            log_info("Звонок уже завершен или не активен, игнорируем дублирующий BYE.")
+            return
+
+        self.active_rtp_transport.close()
+        self.active_rtp_transport = None
 
         transcript = get_session_history_formatted(self.current_session_id)
         summary = await generate_call_summary(transcript)
