@@ -15,7 +15,7 @@ from core.albato_sender import send_lead_to_albato
 async def generate_call_summary(transcript: str) -> str:
     if not transcript:
         return "Разговор не состоялся или был слишком коротким."
-       
+      
     prompt = f"""
     Проанализируй транскрипт телефонного разговора и сделай краткую выжимку (summary):
     1. Суть обращения и главный вопрос клиента.
@@ -63,7 +63,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
 
         alaw_data = audioop.lin2alaw(pcm_data, 2)
         frame_size = 160  # 20ms при 8000Hz
-       
+      
         for i in range(0, len(alaw_data), frame_size):
             chunk = alaw_data[i:i+frame_size]
             if len(chunk) < frame_size:
@@ -77,10 +77,10 @@ class RTPProtocol(asyncio.DatagramProtocol):
                 self.timestamp & 0xFFFFFFFF,
                 0x12345678
             )
-           
+          
             self.sequence_number += 1
             self.timestamp += frame_size
-           
+          
             try:
                 self.transport.sendto(header + chunk, self.remote_target)
             except Exception as e:
@@ -101,17 +101,17 @@ class SIPProtocol(asyncio.DatagramProtocol):
     def parse_sdp_remote_media(self, sdp_text):
         ip_match = re.search(r'c=IN IP4\s+([\d\.]+)', sdp_text, re.I)
         port_match = re.search(r'm=audio\s+(\d+)', sdp_text, re.I)
-       
+      
         ip = ip_match.group(1) if ip_match else None
         port = int(port_match.group(1)) if port_match else None
         return ip, port
 
     def datagram_received(self, data, addr):
         msg = data.decode('utf-8', errors='ignore')
-       
+      
         if "INVITE sip:" in msg:
             log_info(f"Входящий вызов от {addr}")
-           
+          
             call_id_m = re.search(r'Call-ID:\s*(.*)', msg, re.I)
             cseq_m = re.search(r'CSeq:\s*(.*)', msg, re.I)
             from_m = re.search(r'From:\s*(.*)', msg, re.I)
@@ -191,11 +191,19 @@ class SIPWorker:
         self.current_session_id = session_id
         loop = asyncio.get_running_loop()
 
-        transport, protocol = await loop.create_datagram_endpoint(
-            lambda: RTPProtocol(session_id),
-            local_addr=('0.0.0.0', rtp_port)
-        )
-       
+        try:
+            transport, protocol = await loop.create_datagram_endpoint(
+                lambda: RTPProtocol(session_id),
+                local_addr=('0.0.0.0', rtp_port)
+            )
+        except OSError as e:
+            if e.errno == 98:
+                log_info(f"RTP порт {rtp_port} уже открыт, пропускаем повторный bind.")
+                return
+            else:
+                log_error(f"Ошибка открытия RTP сокета: {e}")
+                raise e
+      
         if remote_ip and remote_port:
             protocol.remote_target = (remote_ip, remote_port)
             log_info(f"RTP Цель зафиксирована из SDP: {remote_ip}:{remote_port}")
@@ -234,7 +242,7 @@ class SIPWorker:
                     if text:
                         reply_text = await ask_yandex_gpt(text, self.current_session_id)
                         tts_pcm = await synthesize_speech_yandex(reply_text)
-                       
+                      
                         if tts_pcm:
                             log_info("Воспроизведение ответа бота...")
                             await proto.send_audio_response(tts_pcm)
@@ -253,7 +261,7 @@ class SIPWorker:
         transcript = get_session_history_formatted(self.current_session_id)
         summary = await generate_call_summary(transcript)
         await send_lead_to_albato(self.current_phone, summary, transcript, self.current_session_id)
-       
+      
         clear_session_context(self.current_session_id)
         log_info(f"Звонок {self.current_session_id} полностью обработан и сохранен.")
 
@@ -287,12 +295,12 @@ class SIPWorker:
     async def start(self):
         self.is_running = True
         loop = asyncio.get_running_loop()
-       
+      
         await loop.create_datagram_endpoint(
             lambda: SIPProtocol(self),
             local_addr=('0.0.0.0', self.port)
         )
-       
+      
         asyncio.create_task(self.register_loop())
         log_info("SIP/RTP Движок запущен и ready.")
 
