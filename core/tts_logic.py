@@ -6,7 +6,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
-    # Официальный REST-эндпоинт Yandex SpeechKit API v3
+    # Строго API v3 Neural
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
     headers = {
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
@@ -14,7 +14,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         "Content-Type": "application/json"
     }
    
-    # Настройки нейросети v3: голос Марат, чистые 8000 Гц под телефонию
+    # Используем разрешенный голос alexander на движке v3
     payload = {
         "text": text,
         "outputAudioSpec": {
@@ -27,7 +27,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         },
         "hints": [
             {
-                "voice": "marat"
+                "voice": "alexander"
             },
             {
                 "speed": 1.0
@@ -35,7 +35,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         ]
     }
 
-    timeout = aiohttp.ClientTimeout(total=4.0, connect=1.0)
+    timeout = aiohttp.ClientTimeout(total=3.5, connect=1.0)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
