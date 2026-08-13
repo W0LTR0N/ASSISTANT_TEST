@@ -1,82 +1,71 @@
-import re
 import aiohttp
-from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID, YANDEX_GPT_MODEL
+import json
+import os
+from config import OPENAI_API_KEY  # Если используется VseGPT или OpenAI
 from core.logger import log_info, log_error
-from prompts import SYSTEM_PROMPT
 
-CONVERSATION_SESSIONS = {}
+# Если ключа OpenAI нет в config, проверяем системные переменные
+API_KEY = OPENAI_API_KEY if 'OPENAI_API_KEY' in globals() else os.getenv("OPENAI_API_KEY", "")
 
-def clean_text_for_tts(text: str) -> str:
-    # Жестко вырезаем названия ролей, если GPT их случайно сгенерировал
-    text = re.sub(r'^(Пользователь|Ассистент|Бот|Клиент|Оператор):\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'(Пользователь|Ассистент|Бот|Клиент|Оператор):', '', text, flags=re.IGNORECASE)
-    # Убираем спецсимволы и лишние пробелы
-    text = re.sub(r'[*_~`#\-+\[\]()"\']', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+# Жесткий армейский промпт, лечащий галлюцинации и болтливость
+SYSTEM_PROMPT = """
+Ты — профессиональный голос-менеджер детейлинг-центра Woltron.
+Твоя главная цель: вежливо, четко и коротко проконсультировать клиента и записать его на услугу (полировка, оклейка, керамика).
 
-def clear_session_context(session_id: str):
-    if session_id in CONVERSATION_SESSIONS:
-        del CONVERSATION_SESSIONS[session_id]
-        log_info(f"Контекст сессии очищен: {session_id}")
+ЖЕСТКИЕ ПРАВИЛА ОБЩЕНИЯ:
+1. Отвечай СТРОГО 1-2 короткими предложениями. Говори максимально естественно для телефона.
+2. НИКОГДА не отвечай за клиента, не придумывай продолжение разговора за него.
+3. НИКОГДА не выдумывай марку машины клиента (не говори "У меня Тойота" или "Ваша БМВ", пока клиент сам не назовет авто).
+4. Задавай ровно один вопрос за раз, чтобы продвигать запись.
+5. Если спрашивают цену — назови примерный диапазон и предложи записаться на бесплатный осмотр.
+"""
 
-def get_session_history_formatted(session_id: str) -> str:
-    history = CONVERSATION_SESSIONS.get(session_id, [])
-    lines = []
-    for m in history:
-        role = "Клиент" if m["role"] == "user" else "Бот"
-        lines.append(f"{role}: {m['text']}")
-    return "\n".join(lines)
+async def get_gpt_response(history_messages: list) -> str:
+    """
+    Принимает историю диалога формата [{'role': 'user', 'content': '...'}, ...],
+    отправляет запрос в GPT и возвращает короткий ответ.
+    """
+    if not API_KEY:
+        log_error("GPT Error: API_KEY не найден в конфиге или env")
+        return "Извините, сейчас есть технические накладки со связью. Чем могу помочь?"
 
-async def ask_yandex_gpt(user_message: str, session_id: str = "default") -> str:
-    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    url = "https://api.vsegpt.ru/v1/chat/completions" # Либо https://api.openai.com/v1/chat/completions
+
     headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}"
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
     }
 
-    if session_id not in CONVERSATION_SESSIONS:
-        CONVERSATION_SESSIONS[session_id] = []
-
-    history = CONVERSATION_SESSIONS[session_id]
-  
-    messages = [{"role": "system", "text": SYSTEM_PROMPT}]
-    messages.extend(history)
-    messages.append({"role": "user", "text": user_message})
+    # Формируем полный список сообщений с системной инструкцией вначале
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+   
+    # Добавляем накопившуюся историю диалога
+    if isinstance(history_messages, list):
+        messages.extend(history_messages)
+    elif isinstance(history_messages, str):
+        messages.append({"role": "user", "content": history_messages})
 
     payload = {
-        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/{YANDEX_GPT_MODEL}",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.2,
-            "maxTokens": 90
-        },
-        "messages": messages
+        "model": "openai/gpt-3.5-turbo", # Или используемая у тебя модель (например, openai/gpt-4o-mini)
+        "messages": messages,
+        "temperature": 0.3, # Низкая температура, чтобы бот не фантазировал
+        "max_tokens": 100    # Жесткое ограничение длины, чтобы ответ был быстрым и коротким
     }
 
-    timeout = aiohttp.ClientTimeout(total=3.5, connect=1.0)
+    timeout = aiohttp.ClientTimeout(total=4.0, connect=1.5)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=payload) as response:
-                if response.status != 200:
-                    log_error(f"GPT Ошибка [{response.status}]")
-                    return "Извините, плохо вас слышно. Повторите, пожалуйста."
-            
-                result = await response.json()
-                alternatives = result.get("result", {}).get("alternatives", [])
-                if not alternatives:
-                    return "Повторите, пожалуйста."
-            
-                raw_reply = alternatives[0].get("message", {}).get("text", "")
-                bot_reply = clean_text_for_tts(raw_reply)
-              
-                history.append({"role": "user", "text": user_message})
-                history.append({"role": "assistant", "text": bot_reply})
-              
-                log_info(f"GPT [{session_id}]: {bot_reply}")
-                return bot_reply
-
+                if response.status == 200:
+                    data = await response.json()
+                    answer = data["choices"][0]["message"]["content"].strip()
+                    log_info(f"GPT Успешный ответ: {answer}")
+                    return answer
+                else:
+                    err_text = await response.text()
+                    log_error(f"GPT Ошибка [{response.status}]: {err_text}")
+                    return "Я вас понял. Подскажите, на какой день вам удобнее записаться?"
     except Exception as e:
-        log_error(f"Исключение GPT: {e}")
-        return "Вас плохо слышно, повторите ещё раз."
+        log_error(f"Исключение при запросе к GPT: {e}")
+        return "Да, слушаю вас. Назовите, пожалуйста, марку вашего автомобиля."
