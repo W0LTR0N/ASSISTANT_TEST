@@ -11,13 +11,11 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}"
     }
    
-    # Регулируем параметры произношения для мягкости
+    # Стандартный чистый Филипп без питч-акцентов и искусственных ускорений
     data = {
         "text": text,
         "lang": "ru-RU",
-        "voice": "alena",
-        "emotion": "good",
-        "speed": "1.05",
+        "voice": "filipp",
         "format": "lpcm",
         "sampleRateHertz": "8000",
         "folderId": YANDEX_FOLDER_ID
