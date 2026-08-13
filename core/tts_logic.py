@@ -13,7 +13,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     data = {
         "text": text,
         "lang": "ru-RU",
-        "voice": "marat",
+        "voice": "alena",
         "format": "lpcm",
         "sampleRateHertz": "8000",
         "folderId": YANDEX_FOLDER_ID
