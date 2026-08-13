@@ -1,13 +1,18 @@
 import aiohttp
 import json
 import os
-from config import OPENAI_API_KEY  # Если используется VseGPT или OpenAI
 from core.logger import log_info, log_error
 
-# Если ключа OpenAI нет в config, проверяем системные переменные
-API_KEY = OPENAI_API_KEY if 'OPENAI_API_KEY' in globals() else os.getenv("OPENAI_API_KEY", "")
+# Проверяем ключ в config.py, если его там нет — берем из .env
+try:
+    from config import OPENAI_API_KEY
+    API_KEY = OPENAI_API_KEY
+except ImportError:
+    API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# Жесткий армейский промпт, лечащий галлюцинации и болтливость
+if not API_KEY:
+    API_KEY = os.getenv("OPENAI_API_KEY", "")
+
 SYSTEM_PROMPT = """
 Ты — профессиональный голос-менеджер детейлинг-центра Woltron.
 Твоя главная цель: вежливо, четко и коротко проконсультировать клиента и записать его на услугу (полировка, оклейка, керамика).
@@ -20,36 +25,34 @@ SYSTEM_PROMPT = """
 5. Если спрашивают цену — назови примерный диапазон и предложи записаться на бесплатный осмотр.
 """
 
+async def clear_session_context(session_id: str = None):
+    """Очистка контекста сессии для bot.py"""
+    pass
+
 async def get_gpt_response(history_messages: list) -> str:
-    """
-    Принимает историю диалога формата [{'role': 'user', 'content': '...'}, ...],
-    отправляет запрос в GPT и возвращает короткий ответ.
-    """
     if not API_KEY:
         log_error("GPT Error: API_KEY не найден в конфиге или env")
         return "Извините, сейчас есть технические накладки со связью. Чем могу помочь?"
 
-    url = "https://api.vsegpt.ru/v1/chat/completions" # Либо https://api.openai.com/v1/chat/completions
+    url = "https://api.vsegpt.ru/v1/chat/completions"
 
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # Формируем полный список сообщений с системной инструкцией вначале
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
    
-    # Добавляем накопившуюся историю диалога
     if isinstance(history_messages, list):
         messages.extend(history_messages)
     elif isinstance(history_messages, str):
         messages.append({"role": "user", "content": history_messages})
 
     payload = {
-        "model": "openai/gpt-3.5-turbo", # Или используемая у тебя модель (например, openai/gpt-4o-mini)
+        "model": "openai/gpt-3.5-turbo",
         "messages": messages,
-        "temperature": 0.3, # Низкая температура, чтобы бот не фантазировал
-        "max_tokens": 100    # Жесткое ограничение длины, чтобы ответ был быстрым и коротким
+        "temperature": 0.3,
+        "max_tokens": 100
     }
 
     timeout = aiohttp.ClientTimeout(total=4.0, connect=1.5)
