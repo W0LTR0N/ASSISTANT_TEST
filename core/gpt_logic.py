@@ -7,6 +7,10 @@ from prompts import SYSTEM_PROMPT
 CONVERSATION_SESSIONS = {}
 
 def clean_text_for_tts(text: str) -> str:
+    # Жестко вырезаем названия ролей, если GPT их случайно сгенерировал
+    text = re.sub(r'^(Пользователь|Ассистент|Бот|Клиент|Оператор):\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(Пользователь|Ассистент|Бот|Клиент|Оператор):', '', text, flags=re.IGNORECASE)
+    # Убираем спецсимволы и лишние пробелы
     text = re.sub(r'[*_~`#\-+\[\]()"\']', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
@@ -35,7 +39,7 @@ async def ask_yandex_gpt(user_message: str, session_id: str = "default") -> str:
         CONVERSATION_SESSIONS[session_id] = []
 
     history = CONVERSATION_SESSIONS[session_id]
-   
+  
     messages = [{"role": "system", "text": SYSTEM_PROMPT}]
     messages.extend(history)
     messages.append({"role": "user", "text": user_message})
@@ -58,18 +62,18 @@ async def ask_yandex_gpt(user_message: str, session_id: str = "default") -> str:
                 if response.status != 200:
                     log_error(f"GPT Ошибка [{response.status}]")
                     return "Извините, плохо вас слышно. Повторите, пожалуйста."
-             
+            
                 result = await response.json()
                 alternatives = result.get("result", {}).get("alternatives", [])
                 if not alternatives:
                     return "Повторите, пожалуйста."
-             
+            
                 raw_reply = alternatives[0].get("message", {}).get("text", "")
                 bot_reply = clean_text_for_tts(raw_reply)
-               
+              
                 history.append({"role": "user", "text": user_message})
                 history.append({"role": "assistant", "text": bot_reply})
-               
+              
                 log_info(f"GPT [{session_id}]: {bot_reply}")
                 return bot_reply
 
