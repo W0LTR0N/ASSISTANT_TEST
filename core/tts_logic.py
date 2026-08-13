@@ -6,7 +6,6 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
-    # Строго API v3 Neural
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
     headers = {
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
@@ -14,7 +13,6 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         "Content-Type": "application/json"
     }
    
-    # Используем разрешенный голос alexander на движке v3
     payload = {
         "text": text,
         "outputAudioSpec": {
@@ -42,6 +40,11 @@ async def synthesize_speech_yandex(text: str) -> bytes:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     pcm_data = await response.read()
+                   
+                    # Жесткое выравнивание: PCM 16-bit требует строго чётное количество байт
+                    if len(pcm_data) % 2 != 0:
+                        pcm_data = pcm_data[:-1]
+
                     log_info(f"TTS v3 Живой голос синтезирован PCM байт: {len(pcm_data)}")
                     return pcm_data
                 else:
