@@ -3,7 +3,6 @@ import json
 import os
 from core.logger import log_info, log_error
 
-# Проверяем ключ в config.py, если его там нет — берем из .env
 try:
     from config import OPENAI_API_KEY
     API_KEY = OPENAI_API_KEY
@@ -25,28 +24,42 @@ SYSTEM_PROMPT = """
 5. Если спрашивают цену — назови примерный диапазон и предложи записаться на бесплатный осмотр.
 """
 
-async def clear_session_context(session_id: str = None):
-    """Очистка контекста сессии для bot.py"""
-    pass
+# Хранилище контекста звонков в памяти
+session_histories = {}
 
-async def get_gpt_response(history_messages: list) -> str:
-    if not API_KEY:
-        log_error("GPT Error: API_KEY не найден в конфиге или env")
-        return "Извините, сейчас есть технические накладки со связью. Чем могу помочь?"
+async def clear_session_context(session_id: str = "default"):
+    """Очищает историю диалога для конкретной сессии звонка"""
+    if session_id in session_histories:
+        del session_histories[session_id]
+        log_info(f"Контекст сессии {session_id} очищен")
+
+async def get_session_history(session_id: str = "default"):
+    """Возвращает историю сессии"""
+    return session_histories.get(session_id, [])
+
+async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
+    """
+    Главная функция, которую вызывает sip_worker.py
+    """
+    if not text:
+        return ""
+
+    if session_id not in session_histories:
+        session_histories[session_id] = []
+
+    # Добавляем сообщение пользователя в историю
+    session_histories[session_id].append({"role": "user", "content": text})
+
+    # Ограничиваем историю последними 6 сообщениями, чтобы не раздувать контекст
+    recent_history = session_histories[session_id][-6:]
 
     url = "https://api.vsegpt.ru/v1/chat/completions"
-
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-   
-    if isinstance(history_messages, list):
-        messages.extend(history_messages)
-    elif isinstance(history_messages, str):
-        messages.append({"role": "user", "content": history_messages})
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + recent_history
 
     payload = {
         "model": "openai/gpt-3.5-turbo",
@@ -63,12 +76,21 @@ async def get_gpt_response(history_messages: list) -> str:
                 if response.status == 200:
                     data = await response.json()
                     answer = data["choices"][0]["message"]["content"].strip()
-                    log_info(f"GPT Успешный ответ: {answer}")
+                   
+                    # Сохраняем ответ ассистента в историю
+                    session_histories[session_id].append({"role": "assistant", "content": answer})
+                    log_info(f"GPT [{session_id}]: {answer}")
                     return answer
                 else:
                     err_text = await response.text()
                     log_error(f"GPT Ошибка [{response.status}]: {err_text}")
                     return "Я вас понял. Подскажите, на какой день вам удобнее записаться?"
     except Exception as e:
-        log_error(f"Исключение при запросе к GPT: {e}")
+        log_error(f"Исключение GPT: {e}")
         return "Да, слушаю вас. Назовите, пожалуйста, марку вашего автомобиля."
+
+# Дублирующая обертка на случай, если где-то вызывается get_gpt_response
+async def get_gpt_response(history_messages):
+    if isinstance(history_messages, str):
+        return await ask_yandex_gpt(history_messages)
+    return await ask_yandex_gpt(history_messages[-1]["content"] if history_messages else "")
