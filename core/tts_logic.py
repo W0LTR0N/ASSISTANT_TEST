@@ -10,16 +10,20 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     headers = {
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}"
     }
+   
+    # Регулируем параметры произношения для мягкости
     data = {
         "text": text,
         "lang": "ru-RU",
         "voice": "alena",
+        "emotion": "good",
+        "speed": "1.05",
         "format": "lpcm",
         "sampleRateHertz": "8000",
         "folderId": YANDEX_FOLDER_ID
     }
 
-    timeout = aiohttp.ClientTimeout(total=4.0, connect=1.0)
+    timeout = aiohttp.ClientTimeout(total=3.0, connect=1.0)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
