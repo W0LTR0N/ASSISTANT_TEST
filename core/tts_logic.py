@@ -1,5 +1,6 @@
 import aiohttp
 import base64
+import json  # Обязательно добавь этот импорт
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 
@@ -7,7 +8,6 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
-    # Режем фразы до 250 символов, чтобы v3 не выплевывал ошибку 400
     clean_text = text[:250]
 
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
@@ -16,7 +16,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         "x-folder-id": YANDEX_FOLDER_ID,
         "Content-Type": "application/json"
     }
-   
+  
     payload = {
         "text": clean_text,
         "outputAudioSpec": {
@@ -28,37 +28,44 @@ async def synthesize_speech_yandex(text: str) -> bytes:
             }
         },
         "hints": [
-            {
-                "voice": "alexander"
-            },
-            {
-                "speed": 1.0
-            }
+            {"voice": "alexander"},
+            {"speed": 1.0}
         ]
     }
 
-    timeout = aiohttp.ClientTimeout(total=3.5, connect=1.0)
+    timeout = aiohttp.ClientTimeout(total=5.0, connect=2.0)
+    pcm_data = bytearray()
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
-                    res_json = await response.json()
-                    audio_base64 = res_json.get("audioChunk", {}).get("data", "")
-                   
-                    if not audio_base64:
-                        log_error("TTS v3: Пустой audioChunk в ответе")
+                    # Читаем ответ построчно (потоком)
+                    async for line in response.content:
+                        if not line:
+                            continue
+                        try:
+                            # Парсим каждый чанк отдельно
+                            chunk_json = json.loads(line)
+                            # Проверяем, есть ли аудио-данные в этом чанке
+                            if "audioChunk" in chunk_json:
+                                b64_data = chunk_json["audioChunk"].get("data", "")
+                                if b64_data:
+                                    pcm_data.extend(base64.b64decode(b64_data))
+                        except Exception as e:
+                            log_error(f"Ошибка при парсинге чанка TTS: {e}")
+                            continue
+                  
+                    if len(pcm_data) == 0:
+                        log_error("TTS v3: Получен пустой поток аудио")
                         return b""
-                       
-                    # Декодируем base64 в чистый PCM-звук
-                    pcm_data = base64.b64decode(audio_base64)
-                   
+
                     # Выравниваем сэмплы
                     if len(pcm_data) % 2 != 0:
                         pcm_data = pcm_data[:-1]
 
-                    log_info(f"TTS v3 Декодировано PCM байт: {len(pcm_data)}")
-                    return pcm_data
+                    log_info(f"TTS v3: Успешно собрано {len(pcm_data)} байт аудио")
+                    return bytes(pcm_data)
                 else:
                     err_text = await response.text()
                     log_error(f"TTS v3 Ошибка [{response.status}]: {err_text}")
