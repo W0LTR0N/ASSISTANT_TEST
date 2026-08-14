@@ -3,14 +3,9 @@ import json
 import os
 from core.logger import log_info, log_error
 
-try:
-    from config import OPENAI_API_KEY
-    API_KEY = OPENAI_API_KEY
-except ImportError:
-    API_KEY = os.getenv("OPENAI_API_KEY", "")
-
-if not API_KEY:
-    API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Берем ключи Яндекса из окружения
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "")
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "")
 
 SYSTEM_PROMPT = """
 Ты — профессиональный голос-менеджер детейлинг-центра Woltron.
@@ -35,7 +30,8 @@ async def clear_session_context(session_id: str = "default"):
 
 async def get_session_history_formatted(session_id: str = "default"):
     """Возвращает форматированную историю сессии для sip_worker.py"""
-    return session_histories.get(session_id, [])
+    history = session_histories.get(session_id, [])
+    return "\n".join([f"{msg['role']}: {msg['content']}" for msg in history])
 
 async def get_session_history(session_id: str = "default"):
     """Дубликат функции получения истории"""
@@ -43,7 +39,7 @@ async def get_session_history(session_id: str = "default"):
 
 async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
     """
-    Главная функция, которую вызывает sip_worker.py
+    Главная функция, которую вызывает sip_worker.py (Работает напрямую с Yandex GPT)
     """
     if not text:
         return ""
@@ -57,19 +53,24 @@ async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
     # Ограничиваем историю последними 6 сообщениями
     recent_history = session_histories[session_id][-6:]
 
-    url = "https://api.vsegpt.ru/v1/chat/completions"
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + recent_history
+    messages = [{"role": "system", "text": SYSTEM_PROMPT}]
+    for msg in recent_history:
+        messages.append({"role": msg["role"], "text": msg["content"]})
 
     payload = {
-        "model": "openai/gpt-3.5-turbo",
-        "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": 100
+        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.3,
+            "maxTokens": "100"
+        },
+        "messages": messages
     }
 
     timeout = aiohttp.ClientTimeout(total=4.0, connect=1.5)
@@ -79,7 +80,7 @@ async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    answer = data["choices"][0]["message"]["content"].strip()
+                    answer = data["result"]["alternatives"][0]["message"]["text"].strip()
                    
                     # Сохраняем ответ ассистента в историю
                     session_histories[session_id].append({"role": "assistant", "content": answer})
