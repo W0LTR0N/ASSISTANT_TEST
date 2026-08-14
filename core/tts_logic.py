@@ -1,58 +1,65 @@
-import aiohttp
 import asyncio
+import grpc
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
+
+# Импортируем gRPC стабы Яндекса
+from yandex.cloud.ai.tts.v3 import tts_pb2, tts_pb2_grpc
 
 async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
     clean_text = text[:250]
-    log_info(f"TTS: Запрос синтеза v3 для текста: {clean_text[:50]}...")
+    log_info(f"TTS v3 gRPC: Синтез для текста: {clean_text[:50]}...")
 
-    url = "https://tts.api.cloud.yandex.net/tts/v3/synthesis"
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    # Авторизация по API-Key через gRPC Metadata
+    metadata = (("authorization", f"Api-Key {YANDEX_GPT_API_KEY}"),)
     if YANDEX_FOLDER_ID:
-        headers["x-folder-id"] = YANDEX_FOLDER_ID
+        metadata += (("x-folder-id", YANDEX_FOLDER_ID),)
 
-    payload = {
-        "text": clean_text,
-        "hints": [{"voice": "alexander"}],
-        "outputAudioSpec": {
-            "containerAudioSpec": {
-                "format": "WAV"
-            }
-        }
-    }
+    # Запрос на синтез UtteranceSynthesisRequest
+    request = tts_pb2.UtteranceSynthesisRequest(
+        text=clean_text,
+        output_audio_spec=tts_pb2.AudioFormatOptions(
+            raw_audio_spec=tts_pb2.RawAudioSpec(
+                audio_encoding=tts_pb2.RawAudioSpec.AudioEncoding.LINEAR16_PCM,
+                sample_rate_hertz=8000
+            )
+        ),
+        hints=[
+            tts_pb2.Hints(voice="alexander")
+        ]
+    )
 
-    timeout = aiohttp.ClientTimeout(total=15.0, connect=5.0)
+    pcm_data = bytearray()
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    wav_data = await response.read()
-                   
-                    if not wav_data:
-                        log_error("TTS v3: Получен пустой ответ от сервера")
-                        return b""
+        # Создаем защищенный асинхронный gRPC канал
+        async with grpc.aio.secure_channel(
+            "tts.api.cloud.yandex.net:443",
+            grpc.ssl_channel_credentials()
+        ) as channel:
+            stub = tts_pb2_grpc.SynthesizerStub(channel)
+           
+            # Читаем стрим напрямую
+            stream = stub.UtteranceSynthesis(request, metadata=metadata)
+           
+            async for response in stream:
+                if response.audio_chunk and response.audio_chunk.data:
+                    pcm_data.extend(response.audio_chunk.data)
 
-                    # Срезаем 44 байта WAV-заголовка, получаем чистый PCM
-                    pcm_data = wav_data[44:] if len(wav_data) > 44 and wav_data[:4] == b'RIFF' else wav_data
+        if len(pcm_data) == 0:
+            log_error("TTS v3 gRPC: Получен пустой аудиопоток!")
+            return b""
 
-                    # Выравнивание под 16-bit PCM (2 байта на сэмпл)
-                    if len(pcm_data) % 2 != 0:
-                        pcm_data = pcm_data[:-1]
+        # Выравнивание под 16-bit PCM (по 2 байта на сэмпл)
+        if len(pcm_data) % 2 != 0:
+            pcm_data = pcm_data[:-1]
 
-                    log_info(f"TTS v3: Успешно получено {len(pcm_data)} байт чистейшего PCM")
-                    return pcm_data
-                else:
-                    err_text = await response.text()
-                    log_error(f"TTS v3 Ошибка [{response.status}]: {err_text}")
-                    return b""
+        log_info(f"TTS v3 gRPC: Успешно собрано {len(pcm_data)} байт ровного PCM!")
+        return bytes(pcm_data)
+
     except Exception as e:
-        log_error(f"Исключение TTS v3: {e}")
+        log_error(f"Исключение TTS v3 gRPC: {str(e)}")
         return b""
