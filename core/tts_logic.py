@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import base64
 import json
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
@@ -8,20 +9,24 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
+    # Ограничиваем длину текста для предотвращения ошибок 400
     clean_text = text[:250]
 
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
     headers = {
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
-        "x-folder-id": YANDEX_FOLDER_ID,
         "Content-Type": "application/json"
     }
 
-    # Для сырого PCM 8000 Гц в v3 передается СТРОГО pcmAudioSpec
+    if YANDEX_FOLDER_ID:
+        headers["x-folder-id"] = YANDEX_FOLDER_ID
+
+    # Для сырого PCM 8000 Гц в v3 передается СТРОГО pcmAudioSpec + LINEAR16_PCM
     payload = {
         "text": clean_text,
         "outputAudioSpec": {
             "pcmAudioSpec": {
+                "audioEncoding": "LINEAR16_PCM",
                 "sampleRateHertz": 8000
             }
         },
@@ -31,7 +36,8 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         ]
     }
 
-    timeout = aiohttp.ClientTimeout(total=5.0, connect=2.0)
+    # Таймаут 10 сек (защита от просадок сети)
+    timeout = aiohttp.ClientTimeout(total=10.0, connect=3.0)
     pcm_data = bytearray()
     raw_buffer = bytearray()
 
@@ -42,7 +48,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                     async for chunk in response.content.iter_any():
                         if not chunk:
                             continue
-                       
+                      
                         raw_buffer.extend(chunk)
 
                         while b"\n" in raw_buffer:
@@ -52,7 +58,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                                 continue
                             try:
                                 chunk_json = json.loads(line.decode("utf-8", errors="ignore"))
-                               
+                              
                                 if "error" in chunk_json:
                                     log_error(f"TTS v3 ошибка сервера: {chunk_json['error']}")
                                     continue
@@ -65,11 +71,22 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                                 log_error(f"Ошибка парсинга чанка TTS: {parse_err}")
                                 continue
 
+                    # Добираем остаток буфера, если в конце не было \n
+                    if raw_buffer.strip():
+                        try:
+                            chunk_json = json.loads(raw_buffer.decode("utf-8", errors="ignore"))
+                            if "audioChunk" in chunk_json:
+                                b64_data = chunk_json["audioChunk"].get("data", "")
+                                if b64_data:
+                                    pcm_data.extend(base64.b64decode(b64_data))
+                        except Exception as parse_err:
+                            log_error(f"Ошибка парсинга остатка буфера TTS: {parse_err}")
+
                     if len(pcm_data) == 0:
                         log_error("TTS v3: Получен пустой поток аудио")
                         return b""
 
-                    # Выравниваем сэмплы (16-bit PCM)
+                    # ВАЖНО: Выравнивание 16-bit PCM по чётности строго в самом конце
                     if len(pcm_data) % 2 != 0:
                         pcm_data = pcm_data[:-1]
 
@@ -79,6 +96,9 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                     err_text = await response.text()
                     log_error(f"TTS v3 Ошибка [{response.status}]: {err_text}")
                     return b""
+    except asyncio.TimeoutError:
+        log_error("TTS v3: Таймаут ожидания ответа от Yandex API")
+        return b""
     except Exception as e:
         log_error(f"Исключение TTS v3: {e}")
         return b""
