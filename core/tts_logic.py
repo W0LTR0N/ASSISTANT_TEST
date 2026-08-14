@@ -9,7 +9,6 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
-    # Ограничиваем длину текста для предотвращения ошибок 400
     clean_text = text[:250]
 
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
@@ -21,7 +20,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if YANDEX_FOLDER_ID:
         headers["x-folder-id"] = YANDEX_FOLDER_ID
 
-    # Для сырого PCM 8000 Гц в v3 передается СТРОГО pcmAudioSpec + LINEAR16_PCM
+    # В v3 передаем СТРОГО audioEncoding и убираем конфликтный hints
     payload = {
         "text": clean_text,
         "outputAudioSpec": {
@@ -29,14 +28,9 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                 "audioEncoding": "LINEAR16_PCM",
                 "sampleRateHertz": 8000
             }
-        },
-        "hints": [
-            {"voice": "alexander"},
-            {"speed": 1.0}
-        ]
+        }
     }
 
-    # Таймаут 10 сек (защита от просадок сети)
     timeout = aiohttp.ClientTimeout(total=10.0, connect=3.0)
     pcm_data = bytearray()
     raw_buffer = bytearray()
@@ -71,7 +65,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                                 log_error(f"Ошибка парсинга чанка TTS: {parse_err}")
                                 continue
 
-                    # Добираем остаток буфера, если в конце не было \n
+                    # Добираем остаток буфера
                     if raw_buffer.strip():
                         try:
                             chunk_json = json.loads(raw_buffer.decode("utf-8", errors="ignore"))
@@ -83,10 +77,10 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                             log_error(f"Ошибка парсинга остатка буфера TTS: {parse_err}")
 
                     if len(pcm_data) == 0:
-                        log_error("TTS v3: Получен пустой поток аудио")
+                        log_error("TTS v3: Получен пустой поток аудио от API Яндекса")
                         return b""
 
-                    # ВАЖНО: Выравнивание 16-bit PCM по чётности строго в самом конце
+                    # Выравнивание по 2 байта для 16-bit PCM
                     if len(pcm_data) % 2 != 0:
                         pcm_data = pcm_data[:-1]
 
