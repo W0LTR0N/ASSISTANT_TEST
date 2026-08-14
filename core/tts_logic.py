@@ -1,6 +1,6 @@
 import aiohttp
 import base64
-import json  # Обязательно добавь этот импорт
+import json
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 
@@ -16,7 +16,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         "x-folder-id": YANDEX_FOLDER_ID,
         "Content-Type": "application/json"
     }
-  
+
     payload = {
         "text": clean_text,
         "outputAudioSpec": {
@@ -40,27 +40,30 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
-                    # Читаем ответ построчно (потоком)
-                    async for line in response.content:
-                        if not line:
-                            continue
-                        try:
-                            # Парсим каждый чанк отдельно
-                            chunk_json = json.loads(line)
-                            # Проверяем, есть ли аудио-данные в этом чанке
-                            if "audioChunk" in chunk_json:
-                                b64_data = chunk_json["audioChunk"].get("data", "")
-                                if b64_data:
-                                    pcm_data.extend(base64.b64decode(b64_data))
-                        except Exception as e:
-                            log_error(f"Ошибка при парсинге чанка TTS: {e}")
-                            continue
-                  
+                    buffer = ""
+                    # Читаем буфер произвольного размера без лимита на длину строки 64КБ
+                    async for chunk in response.content.iter_any():
+                        buffer += chunk.decode('utf-8', errors='ignore')
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                chunk_json = json.loads(line)
+                                if "audioChunk" in chunk_json:
+                                    b64_data = chunk_json["audioChunk"].get("data", "")
+                                    if b64_data:
+                                        pcm_data.extend(base64.b64decode(b64_data))
+                            except Exception as e:
+                                log_error(f"Ошибка парсинга чанка TTS: {e}")
+                                continue
+
                     if len(pcm_data) == 0:
                         log_error("TTS v3: Получен пустой поток аудио")
                         return b""
 
-                    # Выравниваем сэмплы
+                    # Выравниваем сэмплы (16-bit PCM)
                     if len(pcm_data) % 2 != 0:
                         pcm_data = pcm_data[:-1]
 
