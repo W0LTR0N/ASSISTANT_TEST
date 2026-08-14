@@ -4,7 +4,8 @@ from google.protobuf.json_format import ParseDict
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 
-from yandex.cloud.ai.tts.v3 import tts_pb2, tts_pb2_grpc
+# Импортируем proto-сообщения и gRPC-сервис
+from yandex.cloud.ai.tts.v3 import tts_pb2, tts_service_pb2_grpc
 
 async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
@@ -13,11 +14,12 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     clean_text = text[:250]
     log_info(f"TTS v3 gRPC: Синтез для текста: {clean_text[:50]}...")
 
+    # Авторизация по API-Key через gRPC Metadata
     metadata = (("authorization", f"Api-Key {YANDEX_GPT_API_KEY}"),)
     if YANDEX_FOLDER_ID:
         metadata += (("x-folder-id", YANDEX_FOLDER_ID),)
 
-    # Используем точные имена полей, которые подсказал Protobuf в логе:
+    # Точный JSON-запрос для ParseDict (с валидированными поп-полями camelCase)
     request_dict = {
         "text": clean_text,
         "outputAudioSpec": {
@@ -35,13 +37,16 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     pcm_data = bytearray()
 
     try:
+        # Создаем чисто асинхронный gRPC канал
         async with grpc.aio.secure_channel(
             "tts.api.cloud.yandex.net:443",
             grpc.ssl_channel_credentials()
         ) as channel:
-            stub = tts_pb2_grpc.SynthesizerStub(channel)
-            stream = stub.UtteranceSynthesis(request, metadata=metadata)
+            # tts_service_pb2_grpc гарантированно содержит SynthesizerStub
+            stub = tts_service_pb2_grpc.SynthesizerStub(channel)
            
+            # Асинхронно читаем бинарный поток байтов
+            stream = stub.UtteranceSynthesis(request, metadata=metadata)
             async for response in stream:
                 if response.audio_chunk and response.audio_chunk.data:
                     pcm_data.extend(response.audio_chunk.data)
@@ -50,7 +55,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
             log_error("TTS v3 gRPC: Получен пустой аудиопоток!")
             return b""
 
-        # Выравнивание под 16-bit PCM (по 2 байта на сэмпл)
+        # Выравнивание под 16-bit PCM (по 2 байта на сэмпл для ровной передачи в SIP)
         if len(pcm_data) % 2 != 0:
             pcm_data = pcm_data[:-1]
 
