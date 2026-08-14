@@ -8,6 +8,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
+    # Режем фразы до 250 символов, чтобы v3 не выплевывал ошибку 400
     clean_text = text[:250]
 
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
@@ -35,28 +36,33 @@ async def synthesize_speech_yandex(text: str) -> bytes:
 
     timeout = aiohttp.ClientTimeout(total=5.0, connect=2.0)
     pcm_data = bytearray()
+    raw_buffer = bytearray()  # Буфер для сборки разорванных TCP-пакетов
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
-                    buffer = ""
-                    # Читаем буфер произвольного размера без лимита на длину строки 64КБ
+                    # Читаем потоковые байты без ограничений по размеру строки 64КБ
                     async for chunk in response.content.iter_any():
-                        buffer += chunk.decode('utf-8', errors='ignore')
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
+                        if not chunk:
+                            continue
+                       
+                        raw_buffer.extend(chunk)
+
+                        # Извлекаем только полностью пришедшие строки (\n)
+                        while b"\n" in raw_buffer:
+                            line, raw_buffer = raw_buffer.split(b"\n", 1)
                             line = line.strip()
                             if not line:
                                 continue
                             try:
-                                chunk_json = json.loads(line)
+                                chunk_json = json.loads(line.decode("utf-8", errors="ignore"))
                                 if "audioChunk" in chunk_json:
                                     b64_data = chunk_json["audioChunk"].get("data", "")
                                     if b64_data:
                                         pcm_data.extend(base64.b64decode(b64_data))
-                            except Exception as e:
-                                log_error(f"Ошибка парсинга чанка TTS: {e}")
+                            except Exception as parse_err:
+                                log_error(f"Ошибка парсинга чанка TTS: {parse_err}")
                                 continue
 
                     if len(pcm_data) == 0:
