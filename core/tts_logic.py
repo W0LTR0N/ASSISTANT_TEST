@@ -1,5 +1,6 @@
 import asyncio
 import grpc
+from google.protobuf.json_format import ParseDict
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 
@@ -16,19 +17,21 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if YANDEX_FOLDER_ID:
         metadata += (("x-folder-id", YANDEX_FOLDER_ID),)
 
-    # Правильное формирование AudioFormatOptions без прямых обращений к отсутствующим атрибутам
-    request = tts_pb2.UtteranceSynthesisRequest(
-        text=clean_text,
-        output_audio_spec=tts_pb2.AudioFormatOptions(
-            container_audio_spec=tts_pb2.ContainerAudioSpec(
-                format=tts_pb2.ContainerAudioSpec.Format.WAV
-            )
-        ),
-        hints=[
-            tts_pb2.Hints(voice="alexander")
+    # Собираем структуру запроса через обычный Python dict
+    # Это 100% обходит проблемы с отсутствующими атрибутами в protobuf-модулях
+    request_dict = {
+        "text": clean_text,
+        "output_audio_spec": {
+            "container_audio_spec": {
+                "format": "WAV"
+            }
+        },
+        "hints": [
+            {"voice": "alexander"}
         ]
-    )
+    }
 
+    request = ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
     audio_bytes = bytearray()
 
     try:
@@ -47,7 +50,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
             log_error("TTS v3 gRPC: Получен пустой аудиопоток!")
             return b""
 
-        # По gRPC получаем чистый WAV-стрим. Отрезаем 44 байта WAV-заголовка для получения PCM:
+        # Получили WAV-поток. Срезаем 44 байта заголовка RIFF, чтобы выдать чистый PCM
         pcm_data = bytes(audio_bytes)
         if len(pcm_data) > 44 and pcm_data[:4] == b'RIFF':
             pcm_data = pcm_data[44:]
