@@ -8,7 +8,6 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
-    # Режем фразы до 250 символов, чтобы v3 не выплевывал ошибку 400
     clean_text = text[:250]
 
     url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
@@ -18,12 +17,10 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         "Content-Type": "application/json"
     }
 
+    # Для сырого PCM 8000 Гц в v3 передается СТРОГО pcmAudioSpec
     payload = {
         "text": clean_text,
         "outputAudioSpec": {
-            "containerAudioSpec": {
-                "containerAudioType": "RAW"
-            },
             "pcmAudioSpec": {
                 "sampleRateHertz": 8000
             }
@@ -36,20 +33,18 @@ async def synthesize_speech_yandex(text: str) -> bytes:
 
     timeout = aiohttp.ClientTimeout(total=5.0, connect=2.0)
     pcm_data = bytearray()
-    raw_buffer = bytearray()  # Буфер для сборки разорванных TCP-пакетов
+    raw_buffer = bytearray()
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
-                    # Читаем потоковые байты без ограничений по размеру строки 64КБ
                     async for chunk in response.content.iter_any():
                         if not chunk:
                             continue
                        
                         raw_buffer.extend(chunk)
 
-                        # Извлекаем только полностью пришедшие строки (\n)
                         while b"\n" in raw_buffer:
                             line, raw_buffer = raw_buffer.split(b"\n", 1)
                             line = line.strip()
@@ -57,6 +52,11 @@ async def synthesize_speech_yandex(text: str) -> bytes:
                                 continue
                             try:
                                 chunk_json = json.loads(line.decode("utf-8", errors="ignore"))
+                               
+                                if "error" in chunk_json:
+                                    log_error(f"TTS v3 ошибка сервера: {chunk_json['error']}")
+                                    continue
+
                                 if "audioChunk" in chunk_json:
                                     b64_data = chunk_json["audioChunk"].get("data", "")
                                     if b64_data:
