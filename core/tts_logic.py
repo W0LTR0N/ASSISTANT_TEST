@@ -1,21 +1,16 @@
 import aiohttp
 import asyncio
-import base64
-import json
-import logging
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
-
-logger = logging.getLogger(__name__)
 
 async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
         return b""
 
     clean_text = text[:250]
-    log_info(f"TTS: Запрос синтеза для текста: {clean_text[:50]}...")
+    log_info(f"TTS: Запрос синтеза v3 для текста: {clean_text[:50]}...")
 
-    url = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
+    url = "https://tts.api.cloud.yandex.net/tts/v3/synthesis"
     headers = {
         "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}",
         "Content-Type": "application/json"
@@ -23,7 +18,6 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     if YANDEX_FOLDER_ID:
         headers["x-folder-id"] = YANDEX_FOLDER_ID
 
-    # Передаем containerAudioSpec WAV 8000 Hz для REST v3
     payload = {
         "text": clean_text,
         "hints": [{"voice": "alexander"}],
@@ -34,54 +28,31 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         }
     }
 
-    timeout = aiohttp.ClientTimeout(total=20.0, connect=5.0)
-    audio_data = bytearray()
+    timeout = aiohttp.ClientTimeout(total=15.0, connect=5.0)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
-                    log_info("TTS v3: Получен статус 200 OK, читаем поток...")
+                    wav_data = await response.read()
                    
-                    async for chunk in response.content.iter_any():
-                        if not chunk:
-                            continue
-                       
-                        # Парсим NDJSON
-                        lines = chunk.decode("utf-8", errors="ignore").splitlines()
-                        for line in lines:
-                            if not line.strip():
-                                continue
-                            try:
-                                chunk_json = json.loads(line)
-                                if "audioChunk" in chunk_json:
-                                    b64_data = chunk_json["audioChunk"].get("data", "")
-                                    if b64_data:
-                                        audio_data.extend(base64.b64decode(b64_data))
-                            except Exception:
-                                continue
-
-                    if len(audio_data) == 0:
-                        log_error("TTS v3: Поток завершен, но данные пустые")
+                    if not wav_data:
+                        log_error("TTS v3: Получен пустой ответ от сервера")
                         return b""
 
-                    # Отрезаем WAV заголовок (44 байта), если он есть
-                    pcm_payload = bytes(audio_data)
-                    if len(pcm_payload) > 44 and pcm_payload[:4] == b'RIFF':
-                        pcm_payload = pcm_payload[44:]
+                    # Срезаем 44 байта WAV-заголовка, получаем чистый PCM
+                    pcm_data = wav_data[44:] if len(wav_data) > 44 and wav_data[:4] == b'RIFF' else wav_data
 
-                    # Выравнивание по 2 байта
-                    if len(pcm_payload) % 2 != 0:
-                        pcm_payload = pcm_payload[:-1]
+                    # Выравнивание под 16-bit PCM (2 байта на сэмпл)
+                    if len(pcm_data) % 2 != 0:
+                        pcm_data = pcm_data[:-1]
 
-                    log_info(f"TTS v3: Успешно собрано {len(pcm_payload)} байт PCM")
-                    return pcm_payload
-               
+                    log_info(f"TTS v3: Успешно получено {len(pcm_data)} байт чистейшего PCM")
+                    return pcm_data
                 else:
-                    err_body = await response.text()
-                    log_error(f"TTS v3 Ошибка [{response.status}]: {err_body}")
+                    err_text = await response.text()
+                    log_error(f"TTS v3 Ошибка [{response.status}]: {err_text}")
                     return b""
-
     except Exception as e:
-        log_error(f"Исключение TTS v3: {str(e)}")
+        log_error(f"Исключение TTS v3: {e}")
         return b""
