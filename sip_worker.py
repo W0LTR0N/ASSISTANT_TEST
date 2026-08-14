@@ -22,7 +22,7 @@ async def generate_call_summary(transcript: str) -> dict:
             "service": "Не указано",
             "preferred_time": "Не указано"
         }
-     
+    
     prompt = f"""
     Проанализируй транскрипт телефонного разговора детейлинг-центра и выдели данные строго в формате JSON без разметки:
     {{
@@ -37,7 +37,7 @@ async def generate_call_summary(transcript: str) -> dict:
     {transcript}
     """
     raw_res = await ask_yandex_gpt(prompt, session_id="summary_generator")
-   
+  
     try:
         # Очищаем от возможных Markdown тэгов
         clean_json = re.sub(r'```json|```', '', raw_res).strip()
@@ -88,7 +88,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
 
         alaw_data = audioop.lin2alaw(pcm_data, 2)
         frame_size = 160  # 20ms при 8000Hz
-     
+    
         for i in range(0, len(alaw_data), frame_size):
             chunk = alaw_data[i:i+frame_size]
             if len(chunk) < frame_size:
@@ -102,10 +102,10 @@ class RTPProtocol(asyncio.DatagramProtocol):
                 self.timestamp & 0xFFFFFFFF,
                 0x12345678
             )
-         
+        
             self.sequence_number += 1
             self.timestamp += frame_size
-         
+        
             try:
                 self.transport.sendto(header + chunk, self.remote_target)
             except Exception as e:
@@ -126,17 +126,17 @@ class SIPProtocol(asyncio.DatagramProtocol):
     def parse_sdp_remote_media(self, sdp_text):
         ip_match = re.search(r'c=IN IP4\s+([\d\.]+)', sdp_text, re.I)
         port_match = re.search(r'm=audio\s+(\d+)', sdp_text, re.I)
-     
+    
         ip = ip_match.group(1) if ip_match else None
         port = int(port_match.group(1)) if port_match else None
         return ip, port
 
     def datagram_received(self, data, addr):
         msg = data.decode('utf-8', errors='ignore')
-     
+    
         if "INVITE sip:" in msg:
             log_info(f"Входящий вызов от {addr}")
-         
+        
             call_id_m = re.search(r'Call-ID:\s*(.*)', msg, re.I)
             cseq_m = re.search(r'CSeq:\s*(.*)', msg, re.I)
             from_m = re.search(r'From:\s*(.*)', msg, re.I)
@@ -264,9 +264,9 @@ class SIPWorker:
         silence_start_time = None
 
         while self.is_running and self.active_rtp_proto == proto:
-            await asyncio.sleep(0.03)  # Сократили шаг цикла для мгновенной реакции
+            await asyncio.sleep(0.03)
 
-            if proto.is_processing or len(proto.pcm_buffer) < 3200:  # Быстрый порог накопления
+            if proto.is_processing or len(proto.pcm_buffer) < 3200:
                 continue
 
             recent_samples = bytes(proto.pcm_buffer[-1600:])
@@ -275,7 +275,7 @@ class SIPWorker:
             if rms < SILENCE_THRESHOLD:
                 if silence_start_time is None:
                     silence_start_time = time.time()
-                elif time.time() - silence_start_time >= 0.25:  # Уменьшили паузу ожидания до 250мс
+                elif time.time() - silence_start_time >= 0.25:
                     proto.is_processing = True
                     audio_to_process = bytes(proto.pcm_buffer)
                     proto.pcm_buffer.clear()
@@ -286,7 +286,7 @@ class SIPWorker:
                     if text:
                         reply_text = await ask_yandex_gpt(text, self.current_session_id)
                         tts_pcm = await synthesize_speech_yandex(reply_text)
-                     
+                    
                         if tts_pcm:
                             log_info("Воспроизведение ответа бота...")
                             await proto.send_audio_response(tts_pcm)
@@ -305,9 +305,10 @@ class SIPWorker:
         self.active_rtp_transport.close()
         self.active_rtp_transport = None
 
-        transcript = get_session_history_formatted(self.current_session_id)
+        # ДОБАВЛЕН AWAIT (исправляет RuntimeWarning)
+        transcript = await get_session_history_formatted(self.current_session_id)
         parsed_lead_data = await generate_call_summary(transcript)
-       
+      
         await send_lead_to_albato(
             phone=self.current_phone,
             summary=parsed_lead_data.get("summary", ""),
@@ -315,8 +316,9 @@ class SIPWorker:
             session_id=self.current_session_id,
             details=parsed_lead_data
         )
-     
-        clear_session_context(self.current_session_id)
+    
+        # ДОБАВЛЕН AWAIT (исправляет RuntimeWarning)
+        await clear_session_context(self.current_session_id)
         log_info(f"Звонок {self.current_session_id} полностью обработан и сохранен.")
 
     async def send_register(self):
@@ -349,12 +351,12 @@ class SIPWorker:
     async def start(self):
         self.is_running = True
         loop = asyncio.get_running_loop()
-     
+    
         await loop.create_datagram_endpoint(
             lambda: SIPProtocol(self),
             local_addr=('0.0.0.0', self.port)
         )
-     
+    
         asyncio.create_task(self.register_loop())
         log_info("SIP/RTP Движок запущен и ready.")
 
