@@ -3,8 +3,8 @@ import grpc
 from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 
-# Импортируем gRPC стабы Яндекса
-from yandex.cloud.ai.tts.v3 import tts_pb2, tts_pb2_grpc
+# Импортируем все нужное
+from yandex.cloud.ai.tts.v3 import tts_pb2, tts_pb2_grpc, audio_format_pb2
 
 async def synthesize_speech_yandex(text: str) -> bytes:
     if not text:
@@ -13,17 +13,16 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     clean_text = text[:250]
     log_info(f"TTS v3 gRPC: Синтез для текста: {clean_text[:50]}...")
 
-    # Авторизация по API-Key через gRPC Metadata
     metadata = (("authorization", f"Api-Key {YANDEX_GPT_API_KEY}"),)
     if YANDEX_FOLDER_ID:
         metadata += (("x-folder-id", YANDEX_FOLDER_ID),)
 
-    # Запрос на синтез UtteranceSynthesisRequest
+    # Запрос с корректными ссылками на объекты
     request = tts_pb2.UtteranceSynthesisRequest(
         text=clean_text,
         output_audio_spec=tts_pb2.AudioFormatOptions(
-            raw_audio_spec=tts_pb2.RawAudioSpec(
-                audio_encoding=tts_pb2.RawAudioSpec.AudioEncoding.LINEAR16_PCM,
+            raw_audio_spec=audio_format_pb2.RawAudioSpec(
+                audio_encoding=audio_format_pb2.RawAudioSpec.LINEAR16_PCM,
                 sample_rate_hertz=8000
             )
         ),
@@ -35,14 +34,11 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     pcm_data = bytearray()
 
     try:
-        # Создаем защищенный асинхронный gRPC канал
         async with grpc.aio.secure_channel(
             "tts.api.cloud.yandex.net:443",
             grpc.ssl_channel_credentials()
         ) as channel:
             stub = tts_pb2_grpc.SynthesizerStub(channel)
-           
-            # Читаем стрим напрямую
             stream = stub.UtteranceSynthesis(request, metadata=metadata)
            
             async for response in stream:
@@ -53,7 +49,6 @@ async def synthesize_speech_yandex(text: str) -> bytes:
             log_error("TTS v3 gRPC: Получен пустой аудиопоток!")
             return b""
 
-        # Выравнивание под 16-bit PCM (по 2 байта на сэмпл)
         if len(pcm_data) % 2 != 0:
             pcm_data = pcm_data[:-1]
 
