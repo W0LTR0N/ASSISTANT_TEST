@@ -69,7 +69,7 @@ async def synthesize_speech_yandex(
         },
         "hints": [
             {
-                "voice": "marina"
+                "voice": "filipp"
             }
         ]
     }
