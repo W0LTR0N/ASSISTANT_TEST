@@ -17,7 +17,6 @@ from core.gpt_logic import ask_yandex_gpt, clear_session_context, get_session_hi
 from core.tts_logic import synthesize_speech_yandex
 from core.albato_sender import send_lead_to_albato
 
-
 async def generate_call_summary(transcript: str) -> dict:
     if not transcript:
         return {
@@ -27,7 +26,7 @@ async def generate_call_summary(transcript: str) -> dict:
             "service": "Не указано",
             "preferred_time": "Не указано"
         }
-  
+ 
     system_instruction = "Ты — AI-аналитик. Твоя задача — извлечь данные из транскрипта и вернуть ИСКЛЮЧИТЕЛЬНО валидный JSON без разметки и без дополнительного текста."
 
     prompt = f"""
@@ -94,7 +93,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
 
         alaw_data = audioop.lin2alaw(pcm_data, 2)
         frame_size = 160  # 20ms при 8000Hz
-  
+ 
         for i in range(0, len(alaw_data), frame_size):
             chunk = alaw_data[i:i+frame_size]
             if len(chunk) < frame_size:
@@ -108,10 +107,10 @@ class RTPProtocol(asyncio.DatagramProtocol):
                 self.timestamp & 0xFFFFFFFF,
                 0x12345678
             )
-      
+     
             self.sequence_number += 1
             self.timestamp += frame_size
-      
+     
             try:
                 self.transport.sendto(header + chunk, self.remote_target)
             except Exception as e:
@@ -132,17 +131,17 @@ class SIPProtocol(asyncio.DatagramProtocol):
     def parse_sdp_remote_media(self, sdp_text):
         ip_match = re.search(r'c=IN IP4\s+([\d\.]+)', sdp_text, re.I)
         port_match = re.search(r'm=audio\s+(\d+)', sdp_text, re.I)
-  
+ 
         ip = ip_match.group(1) if ip_match else None
         port = int(port_match.group(1)) if port_match else None
         return ip, port
 
     def datagram_received(self, data, addr):
         msg = data.decode('utf-8', errors='ignore')
-  
+ 
         if "INVITE sip:" in msg:
             log_info(f"Входящий вызов от {addr}")
-      
+     
             call_id_m = re.search(r'Call-ID:\s*(.*)', msg, re.I)
             cseq_m = re.search(r'CSeq:\s*(.*)', msg, re.I)
             from_m = re.search(r'From:\s*(.*)', msg, re.I)
@@ -208,7 +207,7 @@ class SIPWorker:
         self.active_rtp_transport = None
         self.current_phone = "Неизвестный"
         self.current_session_id = "default"
-       
+      
         self.folder_id = YANDEX_FOLDER_ID
         self.tts_channel = None
         self.tts_stub = None
@@ -227,15 +226,23 @@ class SIPWorker:
         )
 
     async def start_rtp_session(self, session_id, rtp_port, phone, remote_ip, remote_port):
-        self.current_phone = phone
-        self.current_session_id = session_id
-        loop = asyncio.get_running_loop()
-
-        if self.active_rtp_transport and not self.active_rtp_transport.is_closing():
+        if self.current_session_id == session_id and self.active_rtp_transport and not self.active_rtp_transport.is_closing():
             if remote_ip and remote_port and self.active_rtp_proto:
                 self.active_rtp_proto.remote_target = (remote_ip, remote_port)
                 log_info(f"RTP цель обновлена для re-INVITE: {remote_ip}:{remote_port}")
             return
+
+        if self.active_rtp_transport:
+            try:
+                self.active_rtp_transport.close()
+            except Exception:
+                pass
+            self.active_rtp_transport = None
+            self.active_rtp_proto = None
+
+        self.current_phone = phone
+        self.current_session_id = session_id
+        loop = asyncio.get_running_loop()
 
         transport = None
         protocol = None
@@ -273,7 +280,7 @@ class SIPWorker:
         SILENCE_THRESHOLD = 450
         silence_start_time = None
 
-        while self.is_running and self.active_rtp_proto == proto:
+        while self.is_running and self.active_rtp_proto == proto and proto:
             await asyncio.sleep(0.03)
 
             if proto.is_processing or len(proto.pcm_buffer) < 3200:
@@ -296,7 +303,7 @@ class SIPWorker:
                     if text:
                         reply_text = await ask_yandex_gpt(text, self.current_session_id)
                         tts_pcm = await synthesize_speech_yandex(reply_text, self.tts_stub, self.folder_id)
-                  
+                 
                         if tts_pcm:
                             log_info("Воспроизведение ответа бота...")
                             await proto.send_audio_response(tts_pcm)
@@ -308,26 +315,35 @@ class SIPWorker:
                 silence_start_time = None
 
     async def stop_current_call(self):
-        if not self.active_rtp_transport:
+        if not self.active_rtp_transport and not self.active_rtp_proto:
             log_info("Звонок уже завершен или не активен, игнорируем дублирующий BYE.")
             return
 
-        self.active_rtp_transport.close()
-        self.active_rtp_transport = None
+        session_id = self.current_session_id
+        phone = self.current_phone
 
-        transcript = await get_session_history_formatted(self.current_session_id)
+        if self.active_rtp_transport:
+            try:
+                self.active_rtp_transport.close()
+            except Exception:
+                pass
+            self.active_rtp_transport = None
+
+        self.active_rtp_proto = None
+
+        transcript = await get_session_history_formatted(session_id)
         parsed_lead_data = await generate_call_summary(transcript)
-    
+   
         await send_lead_to_albato(
-            phone=self.current_phone,
+            phone=phone,
             summary=parsed_lead_data.get("summary", ""),
             transcript=transcript,
-            session_id=self.current_session_id,
+            session_id=session_id,
             details=parsed_lead_data
         )
-  
-        await clear_session_context(self.current_session_id)
-        log_info(f"Звонок {self.current_session_id} полностью обработан и сохранен.")
+ 
+        await clear_session_context(session_id)
+        log_info(f"Звонок {session_id} полностью обработан и сохранен.")
 
     async def send_register(self):
         if not self.transport:
@@ -359,23 +375,21 @@ class SIPWorker:
     async def start(self):
         self.is_running = True
         loop = asyncio.get_running_loop()
-       
-        # Создаем gRPC канал строго внутри активного event loop
+      
         credentials = grpc.ssl_channel_credentials()
         self.tts_channel = grpc.aio.secure_channel('tts.api.cloud.yandex.net:443', credentials)
         self.tts_stub = tts_service_pb2_grpc.SynthesizerStub(self.tts_channel)
-  
+ 
         await loop.create_datagram_endpoint(
             lambda: SIPProtocol(self),
             local_addr=('0.0.0.0', self.port)
         )
-  
+ 
         asyncio.create_task(self.register_loop())
         log_info("SIP/RTP Движок запущен и ready.")
 
         while self.is_running:
             await asyncio.sleep(1)
-
 
 if __name__ == "__main__":
     worker = SIPWorker()
