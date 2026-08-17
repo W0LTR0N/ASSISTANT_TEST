@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 YANDEX_GPT_API_KEY = os.getenv("YANDEX_GPT_API_KEY", "")
+YANDEX_API_KEY = YANDEX_GPT_API_KEY
+
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "")
 YANDEX_GPT_MODEL = os.getenv("YANDEX_GPT_MODEL", "yandexgpt-lite/latest")
 
