@@ -2,9 +2,10 @@ import os
 import wave
 import audioop
 import logging
+import grpc
 from google.protobuf.json_format import ParseDict
 from yandex.cloud.ai.tts.v3 import tts_pb2, tts_service_pb2_grpc
-from config import YANDEX_API_KEY
+from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
 
 logger = logging.getLogger("woltron")
 
@@ -15,10 +16,15 @@ if os.path.exists(BACKGROUND_FILE):
     try:
         with wave.open(BACKGROUND_FILE, 'rb') as wf:
             BACKGROUND_PCM = wf.readframes(wf.getnframes())
-            logger.info(f"Фоновый шум загружен ({len(BACKGROUND_PCM)} байт).")
-    except Exception as e:
-        logger.error(f"Файл {BACKGROUND_FILE} поврежден ({e}). Синтез будет без фона.")
-        BACKGROUND_PCM = b""
+            logger.info(f"Фоновый шум загружен через wave ({len(BACKGROUND_PCM)} байт).")
+    except Exception as wave_err:
+        try:
+            with open(BACKGROUND_FILE, 'rb') as f:
+                BACKGROUND_PCM = f.read()
+            logger.info(f"Фоновый шум загружен как raw PCM ({len(BACKGROUND_PCM)} байт).")
+        except Exception as raw_err:
+            logger.error(f"Ошибка загрузки {BACKGROUND_FILE}: {raw_err}")
+            BACKGROUND_PCM = b""
 
 def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.25) -> bytes:
     if not bg_pcm or not speech_pcm:
@@ -42,12 +48,15 @@ def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.25) ->
 
 async def synthesize_speech_yandex(
     text: str,
-    stub: tts_service_pb2_grpc.SynthesizerStub,
-    folder_id: str
+    stub: tts_service_pb2_grpc.SynthesizerStub = None,
+    folder_id: str = None
 ) -> bytes:
     clean_text = text.replace('*', '').replace('#', '').replace('-', ' ').strip()
     if not clean_text:
         return b""
+
+    if folder_id is None:
+        folder_id = YANDEX_FOLDER_ID
 
     request_dict = {
         "text": clean_text,
@@ -58,11 +67,16 @@ async def synthesize_speech_yandex(
             }
         },
         "hints": [
-            {"voice": "alexandr"}
+            {"voice": "alexander"}
         ]
     }
 
     try:
+        if stub is None:
+            credentials = grpc.ssl_channel_credentials()
+            channel = grpc.aio.secure_channel('tts.api.cloud.yandex.net:443', credentials)
+            stub = tts_service_pb2_grpc.SynthesizerStub(channel)
+
         req = ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
         metadata = (
             ('x-folder-id', folder_id),
