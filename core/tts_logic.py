@@ -117,7 +117,7 @@ async def synthesize_speech_v3(text: str) -> bytes:
                 ('x-folder-id', FOLDER_ID)
             )
 
-            response_stream = stub.UtteranceSynthesis(request, metadata=metadata)
+            response_stream = stub.Synthesis(request, metadata=metadata)
           
             for response in response_stream:
                 if response.HasField('audio_chunk'):
