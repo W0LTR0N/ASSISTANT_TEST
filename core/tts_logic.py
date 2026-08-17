@@ -1,69 +1,80 @@
-import asyncio
 import os
 import wave
 import audioop
-import grpc
+import logging
+from typing import Optional
 from google.protobuf.json_format import ParseDict
-from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
-from core.logger import log_info, log_error
-
-# Импортируем proto-сообщения и gRPC-сервис
 from yandex.cloud.ai.tts.v3 import tts_pb2, tts_service_pb2_grpc
 
-# Путь к фоновому шуму в корневой папке проекта
-BG_NOISE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "background_noise.wav")
-_bg_noise_cache = None
+logger = logging.getLogger("woltron")
 
-def get_background_noise_pcm(target_len: int) -> bytes:
-    global _bg_noise_cache
-    if _bg_noise_cache is None:
-        if not os.path.exists(BG_NOISE_PATH):
-            log_error(f"Файл фонового шума не найден по пути: {BG_NOISE_PATH}")
-            return b""
-        try:
-            with wave.open(BG_NOISE_PATH, "rb") as wf:
-                # Читаем wav и конвертируем в сырой PCM (8000Hz, 16-bit, mono) если нужно,
-                # или берем готовые кадры, если файл уже в нужном формате
-                raw_data = wf.readframes(wf.getnframes())
-                channels = wf.getnchannels()
-                sample_width = wf.getsampwidth()
-                framerate = wf.getframerate()
+# =====================================================================
+# ЗАГРУЗКА И НАСТРОЙКА ФОНОВОГО АУДИОШУМА
+# =====================================================================
+BACKGROUND_FILE = "background_noise.wav"
+BACKGROUND_PCM = b""
 
-                # Конвертируем в моно и 8000 Гц при необходимости через audioop
-                if channels == 2:
-                    raw_data = audioop.tomono(raw_data, sample_width, 0.5, 0.5)
-                if framerate != 8000:
-                    raw_data, _ = audioop.ratecv(raw_data, sample_width, 1, framerate, 8000, None)
-               
-                _bg_noise_cache = raw_data
-                log_info(f"Фоновый шум успешно загружен и закэширован из {BG_NOISE_PATH}")
-        except Exception as e:
-            log_error(f"Ошибка чтения background_noise.wav: {e}")
-            return b""
+if os.path.exists(BACKGROUND_FILE):
+    try:
+        with wave.open(BACKGROUND_FILE, 'rb') as wf:
+            BACKGROUND_PCM = wf.readframes(wf.getnframes())
+            logger.info(f"Фоновый шум {BACKGROUND_FILE} успешно загружен ({len(BACKGROUND_PCM)} байт).")
+    except Exception as e:
+        logger.error(f"Ошибка чтения файла фонового шума {BACKGROUND_FILE}: {e}")
+else:
+    logger.warning(f"Файл фонового шума {BACKGROUND_FILE} не найден в корневом каталоге. Синтез будет выполнен без фона.")
 
-    if not _bg_noise_cache:
+def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.25) -> bytes:
+    """
+    Подмешивает фоновый шум к синтезированной речи для создания эффекта реального помещения.
+    """
+    if not bg_pcm or not speech_pcm:
+        return speech_pcm
+
+    try:
+        # Корректируем громкость фонового шума
+        adjusted_bg = audioop.mul(bg_pcm, 2, bg_volume)
+       
+        speech_len = len(speech_pcm)
+        bg_len = len(adjusted_bg)
+       
+        # Подгоняем длину фонового шума под длину речи (зацикливание)
+        if bg_len < speech_len:
+            repeats = (speech_len // bg_len) + 1
+            adjusted_bg = (adjusted_bg * repeats)[:speech_len]
+        else:
+            adjusted_bg = adjusted_bg[:speech_len]
+
+        # Накладываем аудиопотоки друг на друга (16-bit PCM, sample_width=2)
+        mixed_pcm = audioop.add(speech_pcm, adjusted_bg, 2)
+        return mixed_pcm
+    except Exception as e:
+        logger.error(f"Ошибка при микшировании фонового шума: {e}")
+        return speech_pcm
+
+# =====================================================================
+# ОСНОВНАЯ ФУНКЦИЯ СИНТЕЗА РЕЧИ (TTS v3 gRPC)
+# =====================================================================
+async def synthesize_speech(
+    text: str,
+    stub: tts_service_pb2_grpc.SynthesizerStub,
+    folder_id: str
+) -> bytes:
+    """
+    Синтезирует речь через Yandex SpeechKit v3 gRPC.
+    Использует голос 'marat' с параметром model='page' для предотвращения PERMISSION_DENIED.
+    """
+    # Первичная очистка текста от спецсимволов и форматирования
+    clean_text = text.replace('*', '').replace('#', '').replace('-', ' ').strip()
+   
+    if not clean_text:
+        logger.warning("Получен пустой текст для синтеза речи.")
         return b""
 
-    # Зацикливаем фоновый шум под длину речи бота
-    loops = target_len // len(_bg_noise_cache) + 1
-    full_noise = _bg_noise_cache * loops
-    return full_noise[:target_len]
-
-async def synthesize_speech_yandex(text: str) -> bytes:
-    if not text:
-        return b""
-
-    clean_text = text[:250]
-    log_info(f"TTS v3 gRPC: Синтез для текста (Марат): {clean_text[:50]}...")
-
-    # Авторизация по API-Key через gRPC Metadata
-    metadata = (("authorization", f"Api-Key {YANDEX_API_KEY}"),)
-    if YANDEX_FOLDER_ID:
-        metadata += (("x-folder-id", YANDEX_FOLDER_ID),)
-
-    # Точный JSON-запрос для ParseDict с голосом marat
+    # Формируем JSON-запрос с указанием премиум-модели page для голоса marat
     request_dict = {
         "text": clean_text,
+        "model": "page",
         "outputAudioSpec": {
             "rawAudio": {
                 "audioEncoding": "LINEAR16_PCM",
@@ -75,46 +86,29 @@ async def synthesize_speech_yandex(text: str) -> bytes:
         ]
     }
 
-    request = ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
-    pcm_data = bytearray()
-
     try:
-        # Создаем чисто асинхронный gRPC канал
-        async with grpc.aio.secure_channel(
-            "tts.api.cloud.yandex.net:443",
-            grpc.ssl_channel_credentials()
-        ) as channel:
-            # tts_service_pb2_grpc гарантированно содержит SynthesizerStub
-            stub = tts_service_pb2_grpc.SynthesizerStub(channel)
-           
-            # Асинхронно читаем бинарный поток байтов
-            stream = stub.UtteranceSynthesis(request, metadata=metadata)
-            async for response in stream:
-                if response.audio_chunk and response.audio_chunk.data:
-                    pcm_data.extend(response.audio_chunk.data)
+        # Преобразуем словарь в Protobuf-сообщение
+        req = ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
+        metadata = (('x-folder-id', folder_id),)
 
-        if len(pcm_data) == 0:
-            log_error("TTS v3 gRPC: Получен пустой аудиопоток!")
+        speech_pcm = bytearray()
+
+        # Асинхронно считываем чанки аудио от gRPC-сервера
+        stream = stub.UtteranceSynthesis(req, metadata=metadata)
+        async for response in stream:
+            if response.HasField("audio_chunk"):
+                speech_pcm.extend(response.audio_chunk.data)
+
+        raw_speech = bytes(speech_pcm)
+
+        if not raw_speech:
+            logger.error("Yandex TTS вернул пустой аудиопоток.")
             return b""
 
-        # Выравнивание под 16-bit PCM (по 2 байта на сэмпл для ровной передачи в SIP)
-        if len(pcm_data) % 2 != 0:
-            pcm_data = pcm_data[:-1]
-
-        speech_bytes = bytes(pcm_data)
-
-        # Аккуратно подмешиваем фоновый шум из корневого файла (голос основной 85%, шум 15%)
-        bg_bytes = get_background_noise_pcm(len(speech_bytes))
-        if bg_bytes:
-            try:
-                speech_bytes = audioop.add(speech_bytes, bg_bytes, 2, 0.85, 0.15)
-                log_info("Фоновый шум успешно наложен на речь Марата.")
-            except Exception as mix_err:
-                log_error(f"Ошибка микширования фонового шума: {mix_err}")
-
-        log_info(f"TTS v3 gRPC: Успешно собрано {len(speech_bytes)} байт ровного PCM!")
-        return speech_bytes
+        # Подмешиваем фоновый шум
+        final_pcm = mix_background(raw_speech, BACKGROUND_PCM, bg_volume=0.25)
+        return final_pcm
 
     except Exception as e:
-        log_error(f"Исключение TTS v3 gRPC: {str(e)}")
+        logger.error(f"Исключение TTS v3 gRPC: {e}")
         return b""
