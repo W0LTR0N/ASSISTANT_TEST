@@ -7,16 +7,16 @@ import struct
 import time
 import json
 import os
-from config import PLUSOFON_SIP_USER, PLUSOFON_SIP_PASSWORD, PLUSOFON_SIP_HOST, PUBLIC_IP, YANDEX_FOLDER_ID, YANDEX_API_KEY
+import grpc
+from yandex.cloud.ai.tts.v3 import tts_service_pb2_grpc
+
+from config import PLUSOFON_SIP_USER, PLUSOFON_SIP_PASSWORD, PLUSOFON_SIP_HOST, PUBLIC_IP, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 from core.stt_logic import transcribe_audio_yandex
 from core.gpt_logic import ask_yandex_gpt, clear_session_context, get_session_history_formatted
 from core.tts_logic import synthesize_speech_yandex
 from core.albato_sender import send_lead_to_albato
 
-# Импорты для gRPC Yandex TTS v3
-import grpc
-from yandex.cloud.ai.tts.v3 import tts_service_pb2_grpc
 
 async def generate_call_summary(transcript: str) -> dict:
     if not transcript:
@@ -209,11 +209,9 @@ class SIPWorker:
         self.current_phone = "Неизвестный"
         self.current_session_id = "default"
        
-        # Инициализация gRPC канала для Yandex TTS v3
         self.folder_id = YANDEX_FOLDER_ID
-        credentials = grpc.ssl_channel_credentials()
-        self.tts_channel = grpc.aio.secure_channel('tts.api.cloud.yandex.net:443', credentials)
-        self.tts_stub = tts_service_pb2_grpc.SynthesizerStub(self.tts_channel)
+        self.tts_channel = None
+        self.tts_stub = None
 
     def generate_sdp(self, rtp_port: int) -> str:
         return (
@@ -297,7 +295,6 @@ class SIPWorker:
 
                     if text:
                         reply_text = await ask_yandex_gpt(text, self.current_session_id)
-                        # Передаем обязательные stub и folder_id
                         tts_pcm = await synthesize_speech_yandex(reply_text, self.tts_stub, self.folder_id)
                   
                         if tts_pcm:
@@ -362,6 +359,11 @@ class SIPWorker:
     async def start(self):
         self.is_running = True
         loop = asyncio.get_running_loop()
+       
+        # Создаем gRPC канал строго внутри активного event loop
+        credentials = grpc.ssl_channel_credentials()
+        self.tts_channel = grpc.aio.secure_channel('tts.api.cloud.yandex.net:443', credentials)
+        self.tts_stub = tts_service_pb2_grpc.SynthesizerStub(self.tts_channel)
   
         await loop.create_datagram_endpoint(
             lambda: SIPProtocol(self),
@@ -373,6 +375,7 @@ class SIPWorker:
 
         while self.is_running:
             await asyncio.sleep(1)
+
 
 if __name__ == "__main__":
     worker = SIPWorker()
