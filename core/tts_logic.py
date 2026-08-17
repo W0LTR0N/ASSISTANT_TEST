@@ -117,7 +117,7 @@ async def synthesize_speech_v3(text: str) -> bytes:
                 ('x-folder-id', FOLDER_ID)
             )
 
-            response_stream = stub.Synthesis(request, metadata=metadata)
+            response_stream = stub.UtteranceSynthesis(request, metadata=metadata)
           
             for response in response_stream:
                 if response.HasField('audio_chunk'):
@@ -126,7 +126,7 @@ async def synthesize_speech_v3(text: str) -> bytes:
         return mix_background_noise(bytes(full_audio))
 
     except Exception as e:
-        logger.error(f"Исключение TTS v3 gRPC: {e}")
+        logger.error(f"Исключение TTS v3 gRPC: {e}", exc_info=True)
         return b""
 
 synthesize_speech_yandex = synthesize_speech_v3
