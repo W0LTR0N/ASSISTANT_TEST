@@ -1,7 +1,7 @@
 import asyncio
 import grpc
 from google.protobuf.json_format import ParseDict
-from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
+from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 
 # Импортируем proto-сообщения и gRPC-сервис
@@ -15,7 +15,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     log_info(f"TTS v3 gRPC: Синтез для текста: {clean_text[:50]}...")
 
     # Авторизация по API-Key через gRPC Metadata
-    metadata = (("authorization", f"Api-Key {YANDEX_GPT_API_KEY}"),)
+    metadata = (("authorization", f"Api-Key {YANDEX_API_KEY}"),)
     if YANDEX_FOLDER_ID:
         metadata += (("x-folder-id", YANDEX_FOLDER_ID),)
 
@@ -65,3 +65,5 @@ async def synthesize_speech_yandex(text: str) -> bytes:
     except Exception as e:
         log_error(f"Исключение TTS v3 gRPC: {str(e)}")
         return b""
+
+
