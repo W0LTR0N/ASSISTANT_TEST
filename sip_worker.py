@@ -287,7 +287,7 @@ class SIPWorker:
 
                     if text:
                         reply_text = await ask_yandex_gpt(text, self.current_session_id)
-                        tts_pcm = await synthesize_speech_yandex(reply_text)
+                        tts_pcm = await synthesize_speech_yandex(reply_text, self.tts_stub, self.folder_id)
                    
                         if tts_pcm:
                             log_info("Воспроизведение ответа бота...")
