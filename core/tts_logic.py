@@ -83,7 +83,7 @@ def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
     return chunks
 
 async def synthesize_speech_v3(text: str) -> bytes:
-    """Синтезирует речь через Yandex SpeechKit v3 с фоновым шумом (асинхронно)."""
+    """Синтезирует речь через Yandex SpeechKit v3 с фоновым шумом."""
     if not text or not text.strip():
         return b""
 
