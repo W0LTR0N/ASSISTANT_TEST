@@ -51,7 +51,6 @@ async def synthesize_speech_yandex(
 
     request_dict = {
         "text": clean_text,
-        "model": "page",
         "outputAudioSpec": {
             "rawAudio": {
                 "audioEncoding": "LINEAR16_PCM",
@@ -65,7 +64,6 @@ async def synthesize_speech_yandex(
 
     try:
         req = ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
-        # Передаем и folder_id, и авторизационный токен Api-Key
         metadata = (
             ('x-folder-id', folder_id),
             ('authorization', f'Api-Key {YANDEX_API_KEY}'),
