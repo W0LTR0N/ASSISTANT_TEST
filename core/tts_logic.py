@@ -4,6 +4,7 @@ import audioop
 import logging
 from google.protobuf.json_format import ParseDict
 from yandex.cloud.ai.tts.v3 import tts_pb2, tts_service_pb2_grpc
+from config import YANDEX_API_KEY
 
 logger = logging.getLogger("woltron")
 
@@ -16,10 +17,8 @@ if os.path.exists(BACKGROUND_FILE):
             BACKGROUND_PCM = wf.readframes(wf.getnframes())
             logger.info(f"Фоновый шум загружен ({len(BACKGROUND_PCM)} байт).")
     except Exception as e:
-        logger.error(f"Файл {BACKGROUND_FILE} поврежден или имеет неверный формат ({e}). Синтез будет без фона.")
+        logger.error(f"Файл {BACKGROUND_FILE} поврежден ({e}). Синтез будет без фона.")
         BACKGROUND_PCM = b""
-else:
-    logger.warning(f"Файл {BACKGROUND_FILE} не найден. Синтез будет без фона.")
 
 def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.25) -> bytes:
     if not bg_pcm or not speech_pcm:
@@ -46,11 +45,7 @@ async def synthesize_speech_yandex(
     stub: tts_service_pb2_grpc.SynthesizerStub,
     folder_id: str
 ) -> bytes:
-    """
-    Синтезирует речь через Yandex SpeechKit v3 gRPC (голос marat, модель page).
-    """
     clean_text = text.replace('*', '').replace('#', '').replace('-', ' ').strip()
-   
     if not clean_text:
         return b""
 
@@ -70,7 +65,11 @@ async def synthesize_speech_yandex(
 
     try:
         req = ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
-        metadata = (('x-folder-id', folder_id),)
+        # Передаем и folder_id, и авторизационный токен Api-Key
+        metadata = (
+            ('x-folder-id', folder_id),
+            ('authorization', f'Api-Key {YANDEX_API_KEY}'),
+        )
 
         speech_pcm = bytearray()
         stream = stub.UtteranceSynthesis(req, metadata=metadata)
