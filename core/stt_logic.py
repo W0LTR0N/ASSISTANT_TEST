@@ -1,5 +1,5 @@
 import aiohttp
-from config import YANDEX_GPT_API_KEY, YANDEX_FOLDER_ID
+from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
 
 async def transcribe_audio_yandex(pcm_bytes: bytes) -> str:
@@ -12,7 +12,7 @@ async def transcribe_audio_yandex(pcm_bytes: bytes) -> str:
         f"&format=lpcm&sampleRateHertz=8000"
     )
     headers = {
-        "Authorization": f"Api-Key {YANDEX_GPT_API_KEY}"
+        "Authorization": f"Api-Key {YANDEX_API_KEY}"
     }
 
     timeout = aiohttp.ClientTimeout(total=4.0, connect=1.0)
