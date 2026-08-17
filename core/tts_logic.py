@@ -71,7 +71,7 @@ def synthesize_speech_v3(text: str) -> bytes:
                     )
                 ),
                 hints=[
-                    tts_pb2.Hints(voice="filipp"),
+                    tts_pb2.Hints(voice="marat"),
                     tts_pb2.Hints(role="good"),  # Дружелюбная, естественная интонация
                     tts_pb2.Hints(speed=0.98)   # Микро-замедление для убирания скороговорки
                 ],
