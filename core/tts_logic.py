@@ -1,69 +1,79 @@
-import asyncio
+import os
+import re
+import logging
 import grpc
-from google.protobuf.json_format import ParseDict
-from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
-from core.logger import log_info, log_error
-
-# Импортируем proto-сообщения и gRPC-сервис
 from yandex.cloud.ai.tts.v3 import tts_pb2, tts_service_pb2_grpc
 
-async def synthesize_speech_yandex(text: str) -> bytes:
-    if not text:
+logger = logging.getLogger(__name__)
+
+IAM_TOKEN = os.getenv("YANDEX_IAM_TOKEN")
+FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+
+def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
+    """Разбивает длинный текст по предложениям или словам, чтобы уложиться в лимит Yandex TTS v3."""
+    if len(text) <= max_chars:
+        return [text]
+   
+    # Разбиваем по знакам препинания
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    chunks = []
+    current_chunk = ""
+
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) + 1 <= max_chars:
+            current_chunk = (current_chunk + " " + sentence).strip()
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = sentence[:max_chars]
+
+    if current_chunk:
+        chunks.append(current_chunk)
+       
+    return chunks
+
+def synthesize_speech_v3(text: str) -> bytes:
+    """Синтезирует речь через Yandex SpeechKit v3 gRPC и возвращает сырой PCM (24kHz, 16bit, mono)."""
+    if not text or not text.strip():
         return b""
 
-    clean_text = text[:250]
-    log_info(f"TTS v3 gRPC: Синтез для текста: {clean_text[:50]}...")
-
-    # Авторизация по API-Key через gRPC Metadata
-    metadata = (("authorization", f"Api-Key {YANDEX_API_KEY}"),)
-    if YANDEX_FOLDER_ID:
-        metadata += (("x-folder-id", YANDEX_FOLDER_ID),)
-
-    # Точный JSON-запрос для ParseDict (с валидированными поп-полями camelCase)
-    request_dict = {
-        "text": clean_text,
-        "outputAudioSpec": {
-            "rawAudio": {
-                "audioEncoding": "LINEAR16_PCM",
-                "sampleRateHertz": 8000
-            }
-        },
-        "hints": [
-            {"voice": "filipp"}
-        ]
-    }
-
-    request = ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
-    pcm_data = bytearray()
+    chunks = split_text_into_chunks(text, max_chars=200)
+    full_audio = bytearray()
 
     try:
-        # Создаем чисто асинхронный gRPC канал
-        async with grpc.aio.secure_channel(
-            "tts.api.cloud.yandex.net:443",
-            grpc.ssl_channel_credentials()
-        ) as channel:
-            # tts_service_pb2_grpc гарантированно содержит SynthesizerStub
-            stub = tts_service_pb2_grpc.SynthesizerStub(channel)
+        cred = grpc.ssl_channel_credentials()
+        channel = grpc.secure_channel('tts.api.cloud.yandex.net:443', cred)
+        stub = tts_service_pb2_grpc.SynthesizerStub(channel)
+
+        for chunk in chunks:
+            request = tts_pb2.UtteranceSynthesisRequest(
+                text=chunk,
+                output_audio_spec=tts_pb2.AudioFormatOptions(
+                    container_audio=tts_pb2.ContainerAudio(
+                        container_audio_type=tts_pb2.ContainerAudio.RAW
+                    )
+                ),
+                hints=[
+                    tts_pb2.Hints(voice="filipp"),
+                    tts_pb2.Hints(speed=1.0)
+                ],
+                loudness_normalization_type=tts_pb2.UtteranceSynthesisRequest.LUFS
+            )
+
+            metadata = (
+                ('authorization', f'Bearer {IAM_TOKEN}'),
+                ('x-folder-id', FOLDER_ID)
+            )
+
+            response_stream = stub.UtteranceSynthesis(request, metadata=metadata)
            
-            # Асинхронно читаем бинарный поток байтов
-            stream = stub.UtteranceSynthesis(request, metadata=metadata)
-            async for response in stream:
-                if response.audio_chunk and response.audio_chunk.data:
-                    pcm_data.extend(response.audio_chunk.data)
+            for response in response_stream:
+                if response.HasField('audio_chunk'):
+                    full_audio.extend(response.audio_chunk.data)
 
-        if len(pcm_data) == 0:
-            log_error("TTS v3 gRPC: Получен пустой аудиопоток!")
-            return b""
-
-        # Выравнивание под 16-bit PCM (по 2 байта на сэмпл для ровной передачи в SIP)
-        if len(pcm_data) % 2 != 0:
-            pcm_data = pcm_data[:-1]
-
-        log_info(f"TTS v3 gRPC: Успешно собрано {len(pcm_data)} байт ровного PCM!")
-        return bytes(pcm_data)
+        return bytes(full_audio)
 
     except Exception as e:
-        log_error(f"Исключение TTS v3 gRPC: {str(e)}")
+        logger.error(f"Исключение TTS v3 gRPC: {e}")
         return b""
-
 
