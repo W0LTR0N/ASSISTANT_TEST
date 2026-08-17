@@ -67,7 +67,11 @@ async def synthesize_speech_yandex(
             }
         },
         "hints": [
-            {"voice": "alexander"}
+            {
+                "voiceHint": {
+                    "voice": "alexander"
+                }
+            }
         ]
     }
 
