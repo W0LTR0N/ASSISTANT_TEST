@@ -2,7 +2,6 @@ import os
 import re
 import logging
 import grpc
-from pydub import AudioSegment
 from yandex.cloud.ai.tts.v3 import tts_pb2, tts_service_pb2_grpc
 
 logger = logging.getLogger(__name__)
@@ -10,56 +9,16 @@ logger = logging.getLogger(__name__)
 IAM_TOKEN = os.getenv("YANDEX_IAM_TOKEN")
 FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
-# --- ЗАГРУЗКА И ПОДГОТОВКА ФОНОВОГО ШУМА ---
-BG_NOISE_PATH = "background_noise.wav"
-BG_NOISE = None
-
-if os.path.exists(BG_NOISE_PATH):
-    try:
-        # Загружаем шум и приглушаем на -28dB, чтобы звучало естественным фоном
-        loaded_noise = AudioSegment.from_file(BG_NOISE_PATH)
-        BG_NOISE = loaded_noise - 28
-        logger.info("Фоновый шум успешно загружен.")
-    except Exception as e:
-        logger.warning(f"Не удалось загрузить фоновый шум: {e}")
-else:
-    logger.warning("Файл background_noise.wav не найден, синтез будет идти без фона.")
-
-def mix_background_noise(raw_pcm_speech: bytes) -> bytes:
-    """Накладывает тихий фоновый шум на сырой PCM-поток речи."""
-    if not raw_pcm_speech or BG_NOISE is None:
-        return raw_pcm_speech
-
-    try:
-        # Речь из Яндекса (24kHz, 16-bit, mono RAW PCM)
-        speech = AudioSegment(
-            data=raw_pcm_speech,
-            sample_width=2,
-            frame_rate=24000,
-            channels=1
-        )
-
-        # Зацикливаем шум под точную длину сгенерированной фразы
-        repeat_count = (len(speech) // len(BG_NOISE)) + 1
-        noise_loop = (BG_NOISE * repeat_count)[:len(speech)]
-
-        # Накладываем речь поверх фона
-        mixed = speech.overlay(noise_loop)
-        return mixed.raw_data
-    except Exception as e:
-        logger.error(f"Ошибка при микшировании фона: {e}")
-        return raw_pcm_speech
-
 def humanize_text_for_tts(text: str) -> str:
-    """Очищает текст от символов и вставляет естественные паузы для TTS."""
+    """Очищает текст и вставляет физиологические паузы (вдохи) для человечности."""
     if not text:
         return ""
    
-    # Убираем дефисы и спецсимволы, чтобы Яндекс не заикался
+    # 1. Зачищаем спецсимволы, вызывающие заикания
     text = re.sub(r'[\-\–\—]', ' ', text)
     text = re.sub(r'[*#_\"\'`:]', '', text)
    
-    # Расставляем паузы по знакам препинания
+    # 2. Добавляем физиологические микро-паузы перед вопросами и после вводных фраз
     text = text.replace("? ", " <break time='350ms'/> ")
     text = text.replace(", ", " <break time='180ms'/> ")
     text = text.replace(". ", " <break time='300ms'/> ")
@@ -67,7 +26,7 @@ def humanize_text_for_tts(text: str) -> str:
     return text.strip()
 
 def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
-    """Разбивает длинный текст на логические куски до 200 символов."""
+    """Разбивает текст на логические куски для обхода жестких лимитов gRPC."""
     if len(text) <= max_chars:
         return [text]
    
@@ -89,10 +48,11 @@ def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
     return chunks
 
 def synthesize_speech_v3(text: str) -> bytes:
-    """Синтезирует речь через Yandex SpeechKit v3 с фоновым шумом."""
+    """Синтезирует максимально естественную речь через Yandex SpeechKit v3 gRPC."""
     if not text or not text.strip():
         return b""
 
+    # Готовим живой текст с паузами
     humanized = humanize_text_for_tts(text)
     chunks = split_text_into_chunks(humanized, max_chars=200)
     full_audio = bytearray()
@@ -111,9 +71,9 @@ def synthesize_speech_v3(text: str) -> bytes:
                     )
                 ),
                 hints=[
-                    tts_pb2.Hints(voice="marat"),  # Голос Марата
-                    tts_pb2.Hints(role="good"),   # Дружелюбный тон
-                    tts_pb2.Hints(speed=0.98)    # Естественная скорость
+                    tts_pb2.Hints(voice="filipp"),
+                    tts_pb2.Hints(role="good"),  # Дружелюбная, естественная интонация
+                    tts_pb2.Hints(speed=0.98)   # Микро-замедление для убирания скороговорки
                 ],
                 loudness_normalization_type=tts_pb2.UtteranceSynthesisRequest.LUFS
             )
@@ -129,8 +89,7 @@ def synthesize_speech_v3(text: str) -> bytes:
                 if response.HasField('audio_chunk'):
                     full_audio.extend(response.audio_chunk.data)
 
-        # Склеиваем с фоновым шумом перед отдачей в поток
-        return mix_background_noise(bytes(full_audio))
+        return bytes(full_audio)
 
     except Exception as e:
         logger.error(f"Исключение TTS v3 gRPC: {e}")
