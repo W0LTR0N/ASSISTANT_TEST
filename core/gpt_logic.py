@@ -23,6 +23,25 @@ async def get_session_history(session_id: str = "default"):
     """Возвращает сырой массив истории"""
     return session_histories.get(session_id, [])
 
+def clean_gpt_reply(text: str) -> str:
+    """Очищает ответ от дорисованных ролей и обрезает под лимит Yandex TTS"""
+    if not text:
+        return ""
+   
+    # 1. Если GPT решила сыграть за клиента, отрезаем всё после первой попытки
+    for stop_word in ["Пользователь:", "Клиент:", "\nПользователь", "\nКлиент", "Пользователь :", "Клиент :"]:
+        if stop_word in text:
+            text = text.split(stop_word)[0]
+
+    # 2. Чистим префиксы Марины/Ассистента
+    text = text.replace("Ассистент:", "").replace("Марина:", "").replace("Филипп:", "").strip()
+
+    # 3. Жесткая страховка для Yandex TTS (лимит 250 символов)
+    if len(text) > 240:
+        text = text[:240].rsplit(' ', 1)[0] + "."
+
+    return text
+
 async def ask_yandex_gpt(text: str, session_id: str = "default", system_override: str = None) -> str:
     """
     Главная функция, которую вызывает sip_worker.py (Работает напрямую с Yandex GPT)
@@ -57,7 +76,7 @@ async def ask_yandex_gpt(text: str, session_id: str = "default", system_override
         "completionOptions": {
             "stream": False,
             "temperature": 0.2 if system_override else 0.3,
-            "maxTokens": "150"
+            "maxTokens": 150
         },
         "messages": messages
     }
@@ -69,12 +88,16 @@ async def ask_yandex_gpt(text: str, session_id: str = "default", system_override
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
-                    answer = data["result"]["alternatives"][0]["message"]["text"].strip()
+                    raw_answer = data["result"]["alternatives"][0]["message"]["text"].strip()
                    
+                    # Очищаем ответ от ролей и лимитов только для разговора
                     if not system_override:
+                        answer = clean_gpt_reply(raw_answer)
                         session_histories[session_id].append({"role": "assistant", "content": answer})
                         log_info(f"GPT [{session_id}]: {answer}")
-                    return answer
+                        return answer
+                   
+                    return raw_answer
                 else:
                     err_text = await response.text()
                     log_error(f"GPT Ошибка [{response.status}]: {err_text}")
