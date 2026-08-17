@@ -8,3 +8,4 @@ grpcio
 grpcio-tools
 yandexcloud
 protobuf
+pydub
