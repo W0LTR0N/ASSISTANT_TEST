@@ -1,23 +1,10 @@
+
 import aiohttp
 import json
 import os
+from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
 from core.logger import log_info, log_error
-
-# Берем ключи Яндекса из окружения
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "")
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "")
-
-SYSTEM_PROMPT = """
-Ты — профессиональный голос-менеджер детейлинг-центра Woltron.
-Твоя главная цель: вежливо, четко и коротко проконсультировать клиента и записать его на услугу (полировка, оклейка, керамика).
-
-ЖЕСТКИЕ ПРАВИЛА ОБЩЕНИЯ:
-1. Отвечай СТРОГО 1-2 короткими предложениями. Говори максимально естественно для телефона.
-2. НИКОГДА не отвечай за клиента, не придумывай продолжение разговора за него.
-3. НИКОГДА не выдумывай марку машины клиента (не говори "У меня Тойота" или "Ваша БМВ", пока клиент сам не назовет авто).
-4. Задавай ровно один вопрос за раз, чтобы продвигать запись.
-5. Если спрашивают цену — назови примерный диапазон и предложи записаться на бесплатный осмотр.
-"""
+from prompts import SYSTEM_PROMPT
 
 # Хранилище контекста звонков в памяти
 session_histories = {}
@@ -34,24 +21,25 @@ async def get_session_history_formatted(session_id: str = "default"):
     return "\n".join([f"{msg['role']}: {msg['content']}" for msg in history])
 
 async def get_session_history(session_id: str = "default"):
-    """Дубликат функции получения истории"""
+    """Возвращает сырой массив истории"""
     return session_histories.get(session_id, [])
 
-async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
+async def ask_yandex_gpt(text: str, session_id: str = "default", system_override: str = None) -> str:
     """
     Главная функция, которую вызывает sip_worker.py (Работает напрямую с Yandex GPT)
     """
     if not text:
         return ""
 
-    if session_id not in session_histories:
+    if session_id not in session_histories and not system_override:
         session_histories[session_id] = []
 
-    # Добавляем сообщение пользователя в историю
-    session_histories[session_id].append({"role": "user", "content": text})
-
-    # Ограничиваем историю последними 6 сообщениями
-    recent_history = session_histories[session_id][-6:]
+    # Добавляем сообщение в историю только если это диалог, а не служебный парсер
+    if not system_override:
+        session_histories[session_id].append({"role": "user", "content": text})
+        recent_history = session_histories[session_id][-6:]
+    else:
+        recent_history = [{"role": "user", "content": text}]
 
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
@@ -59,7 +47,9 @@ async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
         "Content-Type": "application/json"
     }
 
-    messages = [{"role": "system", "text": SYSTEM_PROMPT}]
+    active_system_prompt = system_override if system_override else SYSTEM_PROMPT
+
+    messages = [{"role": "system", "text": active_system_prompt}]
     for msg in recent_history:
         messages.append({"role": msg["role"], "text": msg["content"]})
 
@@ -67,8 +57,8 @@ async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
         "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
         "completionOptions": {
             "stream": False,
-            "temperature": 0.3,
-            "maxTokens": "100"
+            "temperature": 0.2 if system_override else 0.3,
+            "maxTokens": "150"
         },
         "messages": messages
     }
@@ -82,9 +72,9 @@ async def ask_yandex_gpt(text: str, session_id: str = "default") -> str:
                     data = await response.json()
                     answer = data["result"]["alternatives"][0]["message"]["text"].strip()
                    
-                    # Сохраняем ответ ассистента в историю
-                    session_histories[session_id].append({"role": "assistant", "content": answer})
-                    log_info(f"GPT [{session_id}]: {answer}")
+                    if not system_override:
+                        session_histories[session_id].append({"role": "assistant", "content": answer})
+                        log_info(f"GPT [{session_id}]: {answer}")
                     return answer
                 else:
                     err_text = await response.text()
