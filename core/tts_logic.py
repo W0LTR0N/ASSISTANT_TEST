@@ -16,6 +16,7 @@ BG_NOISE = None
 
 if os.path.exists(BG_NOISE_PATH):
     try:
+        # Загружаем шум и приглушаем на -28dB, чтобы звучало естественным фоном
         loaded_noise = AudioSegment.from_file(BG_NOISE_PATH)
         BG_NOISE = loaded_noise - 28
         logger.info("Фоновый шум успешно загружен.")
@@ -30,6 +31,7 @@ def mix_background_noise(raw_pcm_speech: bytes) -> bytes:
         return raw_pcm_speech
 
     try:
+        # Речь из Яндекса (24kHz, 16-bit, mono RAW PCM)
         speech = AudioSegment(
             data=raw_pcm_speech,
             sample_width=2,
@@ -37,9 +39,11 @@ def mix_background_noise(raw_pcm_speech: bytes) -> bytes:
             channels=1
         )
 
+        # Зацикливаем шум под точную длину сгенерированной фразы
         repeat_count = (len(speech) // len(BG_NOISE)) + 1
         noise_loop = (BG_NOISE * repeat_count)[:len(speech)]
 
+        # Накладываем речь поверх фона
         mixed = speech.overlay(noise_loop)
         return mixed.raw_data
     except Exception as e:
@@ -50,21 +54,23 @@ def humanize_text_for_tts(text: str) -> str:
     """Очищает текст от символов и вставляет естественные паузы для TTS."""
     if not text:
         return ""
-  
+   
+    # Убираем дефисы и спецсимволы, чтобы Яндекс не заикался
     text = re.sub(r'[\-\–\—]', ' ', text)
     text = re.sub(r'[*#_\"\'`:]', '', text)
-  
+   
+    # Расставляем паузы по знакам препинания
     text = text.replace("? ", " <break time='350ms'/> ")
     text = text.replace(", ", " <break time='180ms'/> ")
     text = text.replace(". ", " <break time='300ms'/> ")
-  
+   
     return text.strip()
 
 def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
     """Разбивает длинный текст на логические куски до 200 символов."""
     if len(text) <= max_chars:
         return [text]
-  
+   
     sentences = re.split(r'(?<=[.!?]) +', text)
     chunks = []
     current_chunk = ""
@@ -79,10 +85,10 @@ def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
 
     if current_chunk:
         chunks.append(current_chunk)
-      
+       
     return chunks
 
-async def synthesize_speech_v3(text: str) -> bytes:
+def synthesize_speech_v3(text: str) -> bytes:
     """Синтезирует речь через Yandex SpeechKit v3 с фоновым шумом."""
     if not text or not text.strip():
         return b""
@@ -105,9 +111,9 @@ async def synthesize_speech_v3(text: str) -> bytes:
                     )
                 ),
                 hints=[
-                    tts_pb2.Hints(voice="marat"),
-                    tts_pb2.Hints(role="good"),
-                    tts_pb2.Hints(speed=0.98)
+                    tts_pb2.Hints(voice="marat"),  # Голос Марата
+                    tts_pb2.Hints(role="good"),   # Дружелюбный тон
+                    tts_pb2.Hints(speed=0.98)    # Естественная скорость
                 ],
                 loudness_normalization_type=tts_pb2.UtteranceSynthesisRequest.LUFS
             )
@@ -118,15 +124,14 @@ async def synthesize_speech_v3(text: str) -> bytes:
             )
 
             response_stream = stub.UtteranceSynthesis(request, metadata=metadata)
-          
+           
             for response in response_stream:
                 if response.HasField('audio_chunk'):
                     full_audio.extend(response.audio_chunk.data)
 
+        # Склеиваем с фоновым шумом перед отдачей в поток
         return mix_background_noise(bytes(full_audio))
 
     except Exception as e:
-        logger.error(f"Исключение TTS v3 gRPC: {e}", exc_info=True)
+        logger.error(f"Исключение TTS v3 gRPC: {e}")
         return b""
-
-synthesize_speech_yandex = synthesize_speech_v3
