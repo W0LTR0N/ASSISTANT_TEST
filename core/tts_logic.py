@@ -29,7 +29,7 @@ async def synthesize_speech_yandex(text: str) -> bytes:
             }
         },
         "hints": [
-            {"voice": "alexander"}
+            {"voice": "filipp"}
         ]
     }
 
