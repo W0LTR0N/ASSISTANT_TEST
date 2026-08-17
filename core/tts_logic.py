@@ -58,6 +58,7 @@ async def synthesize_speech_yandex(
     if folder_id is None:
         folder_id = YANDEX_FOLDER_ID
 
+    # Строго 1 поле внутри элемента массива hints (так как в protobuf это oneof)
     request_dict = {
         "text": clean_text,
         "outputAudioSpec": {
@@ -68,8 +69,7 @@ async def synthesize_speech_yandex(
         },
         "hints": [
             {
-                "voice": "alexander",
-                "role": "neutral"
+                "voice": "alexander"
             }
         ]
     }
