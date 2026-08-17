@@ -9,12 +9,27 @@ logger = logging.getLogger(__name__)
 IAM_TOKEN = os.getenv("YANDEX_IAM_TOKEN")
 FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 
+def humanize_text_for_tts(text: str) -> str:
+    """Очищает текст и вставляет физиологические паузы (вдохи) для человечности."""
+    if not text:
+        return ""
+   
+    # 1. Зачищаем спецсимволы, вызывающие заикания
+    text = re.sub(r'[\-\–\—]', ' ', text)
+    text = re.sub(r'[*#_\"\'`:]', '', text)
+   
+    # 2. Добавляем физиологические микро-паузы перед вопросами и после вводных фраз
+    text = text.replace("? ", " <break time='350ms'/> ")
+    text = text.replace(", ", " <break time='180ms'/> ")
+    text = text.replace(". ", " <break time='300ms'/> ")
+   
+    return text.strip()
+
 def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
-    """Разбивает длинный текст по предложениям или словам, чтобы уложиться в лимит Yandex TTS v3."""
+    """Разбивает текст на логические куски для обхода жестких лимитов gRPC."""
     if len(text) <= max_chars:
         return [text]
    
-    # Разбиваем по знакам препинания
     sentences = re.split(r'(?<=[.!?]) +', text)
     chunks = []
     current_chunk = ""
@@ -33,11 +48,13 @@ def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
     return chunks
 
 def synthesize_speech_v3(text: str) -> bytes:
-    """Синтезирует речь через Yandex SpeechKit v3 gRPC и возвращает сырой PCM (24kHz, 16bit, mono)."""
+    """Синтезирует максимально естественную речь через Yandex SpeechKit v3 gRPC."""
     if not text or not text.strip():
         return b""
 
-    chunks = split_text_into_chunks(text, max_chars=200)
+    # Готовим живой текст с паузами
+    humanized = humanize_text_for_tts(text)
+    chunks = split_text_into_chunks(humanized, max_chars=200)
     full_audio = bytearray()
 
     try:
@@ -55,7 +72,8 @@ def synthesize_speech_v3(text: str) -> bytes:
                 ),
                 hints=[
                     tts_pb2.Hints(voice="filipp"),
-                    tts_pb2.Hints(speed=1.0)
+                    tts_pb2.Hints(role="good"),  # Дружелюбная, естественная интонация
+                    tts_pb2.Hints(speed=0.98)   # Микро-замедление для убирания скороговорки
                 ],
                 loudness_normalization_type=tts_pb2.UtteranceSynthesisRequest.LUFS
             )
@@ -76,4 +94,3 @@ def synthesize_speech_v3(text: str) -> bytes:
     except Exception as e:
         logger.error(f"Исключение TTS v3 gRPC: {e}")
         return b""
-
