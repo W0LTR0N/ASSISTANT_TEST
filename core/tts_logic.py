@@ -54,23 +54,23 @@ def humanize_text_for_tts(text: str) -> str:
     """Очищает текст от символов и вставляет естественные паузы для TTS."""
     if not text:
         return ""
-   
+  
     # Убираем дефисы и спецсимволы, чтобы Яндекс не заикался
     text = re.sub(r'[\-\–\—]', ' ', text)
     text = re.sub(r'[*#_\"\'`:]', '', text)
-   
+  
     # Расставляем паузы по знакам препинания
     text = text.replace("? ", " <break time='350ms'/> ")
     text = text.replace(", ", " <break time='180ms'/> ")
     text = text.replace(". ", " <break time='300ms'/> ")
-   
+  
     return text.strip()
 
 def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
     """Разбивает длинный текст на логические куски до 200 символов."""
     if len(text) <= max_chars:
         return [text]
-   
+  
     sentences = re.split(r'(?<=[.!?]) +', text)
     chunks = []
     current_chunk = ""
@@ -85,7 +85,7 @@ def split_text_into_chunks(text: str, max_chars: int = 200) -> list[str]:
 
     if current_chunk:
         chunks.append(current_chunk)
-       
+      
     return chunks
 
 def synthesize_speech_v3(text: str) -> bytes:
@@ -124,7 +124,7 @@ def synthesize_speech_v3(text: str) -> bytes:
             )
 
             response_stream = stub.UtteranceSynthesis(request, metadata=metadata)
-           
+          
             for response in response_stream:
                 if response.HasField('audio_chunk'):
                     full_audio.extend(response.audio_chunk.data)
@@ -135,3 +135,6 @@ def synthesize_speech_v3(text: str) -> bytes:
     except Exception as e:
         logger.error(f"Исключение TTS v3 gRPC: {e}")
         return b""
+
+# Связываем имя функции с тем, что ждет sip_worker.py
+synthesize_speech_yandex = synthesize_speech_v3
