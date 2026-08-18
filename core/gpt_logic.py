@@ -1,112 +1,178 @@
+import asyncio
 import aiohttp
 import json
-import os
-from config import YANDEX_API_KEY, YANDEX_FOLDER_ID
+import re
+import time
+import config
+try:
+    from core.prompts import SYSTEM_PROMPT
+except ImportError:
+    from prompts import SYSTEM_PROMPT
 from core.logger import log_info, log_error
-from prompts import SYSTEM_PROMPT
 
-# Хранилище контекста звонков в памяти
 session_histories = {}
+session_timestamps = {}
+_dialog_semaphore = asyncio.Semaphore(5)
+_summary_semaphore = asyncio.Semaphore(2)
+_http_session = None
+HISTORY_LIMIT = 30
+SESSION_TTL = 1800  # 30 минут
 
-async def clear_session_context(session_id: str = "default"):
-    """Очищает историю диалога для конкретной сессии звонка"""
-    if session_id in session_histories:
-        del session_histories[session_id]
-        log_info(f"Контекст сессии {session_id} очищен")
+FALLBACK_PHRASE = "Простите, я вас не расслышал, повторите, пожалуйста."
 
-async def get_session_history_formatted(session_id: str = "default"):
-    """Возвращает форматированную историю сессии для sip_worker.py"""
-    history = session_histories.get(session_id, [])
-    return "\n".join([f"{msg['role']}: {msg['content']}" for msg in history])
+async def _get_http_session():
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=config.SUMMARY_GPT_TIMEOUT))
+    return _http_session
 
-async def get_session_history(session_id: str = "default"):
-    """Возвращает сырой массив истории"""
-    return session_histories.get(session_id, [])
+async def close_gpt_session():
+    global _http_session
+    if _http_session is not None and not _http_session.closed:
+        await _http_session.close()
+
+def _truncate_message(content: str, max_len=200):
+    return content[:max_len] + "..." if len(content) > max_len else content
+
+def _push(session_id: str, role: str, content: str):
+    h = session_histories.setdefault(session_id, [])
+    h.append({"role": role, "content": content})
+    session_timestamps[session_id] = time.time()
+    if len(h) > HISTORY_LIMIT:
+        del h[:len(h) - HISTORY_LIMIT]
 
 def clean_gpt_reply(text: str) -> str:
-    """Очищает ответ от дорисованных ролей и обрезает под лимит Yandex TTS"""
     if not text:
         return ""
-   
-    # 1. Если GPT решила сыграть за клиента, отрезаем всё после первой попытки
     for stop_word in ["Пользователь:", "Клиент:", "\nПользователь", "\nКлиент", "Пользователь :", "Клиент :"]:
         if stop_word in text:
             text = text.split(stop_word)[0]
-
-    # 2. Чистим префиксы Марины/Ассистента
-    text = text.replace("Ассистент:", "").replace("Марина:", "").replace("Филипп:", "").strip()
-
-    # 3. Жесткая страховка для Yandex TTS (лимит 250 символов)
-    if len(text) > 240:
-        text = text[:240].rsplit(' ', 1)[0] + "."
-
+    for name in ["Ассистент:", "Марина:", config.BOT_NAME + ":"]:
+        text = text.replace(name, "")
+    text = text.strip()
+    if text.startswith("{") or text.startswith("["):
+        return FALLBACK_PHRASE
+    for ch in ["*", "#", "_", "`"]:
+        text = text.replace(ch, "")
+    lines = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln[:2] in ("- ", "• "):
+            ln = ln[2:].strip()
+        if ln:
+            lines.append(ln)
+    text = re.sub(r"\s{2,}", " ", " ".join(lines)).strip()
+    if len(text) > 320:
+        cut = text[:320]
+        last_stop = max(cut.rfind('.'), cut.rfind('!'), cut.rfind('?'))
+        text = cut[:last_stop + 1] if last_stop > 50 else cut.rsplit(' ', 1)[0] + "."
     return text
 
-async def ask_yandex_gpt(text: str, session_id: str = "default", system_override: str = None) -> str:
-    """
-    Главная функция, которую вызывает sip_worker.py (Работает напрямую с Yandex GPT)
-    """
-    if not text:
-        return ""
-
-    if session_id not in session_histories and not system_override:
-        session_histories[session_id] = []
-
-    # Добавляем сообщение в историю только если это диалог, а не служебный парсер
-    if not system_override:
-        session_histories[session_id].append({"role": "user", "content": text})
-        recent_history = session_histories[session_id][-6:]
-    else:
-        recent_history = [{"role": "user", "content": text}]
-
+async def _completion(messages: list, temperature: float, max_tokens: int,
+                      sem: asyncio.Semaphore = None, timeout: float = None, session_id: str = None):
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json"
+        "Authorization": f"Api-Key {config.YANDEX_GPT_API_KEY}",
+        "Content-Type": "application/json",
     }
-
-    active_system_prompt = system_override if system_override else SYSTEM_PROMPT
-
-    messages = [{"role": "system", "text": active_system_prompt}]
-    for msg in recent_history:
-        messages.append({"role": msg["role"], "text": msg["content"]})
-
     payload = {
-        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.2 if system_override else 0.3,
-            "maxTokens": 150
-        },
-        "messages": messages
+        "modelUri": f"gpt://{config.YANDEX_FOLDER_ID}/{config.YANDEX_GPT_MODEL}",
+        "completionOptions": {"stream": False, "temperature": temperature, "maxTokens": str(max_tokens)},
+        "messages": messages,
     }
-
-    timeout = aiohttp.ClientTimeout(total=4.0, connect=1.5)
-
+    req_timeout = aiohttp.ClientTimeout(total=timeout or config.SUMMARY_GPT_TIMEOUT)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, headers=headers, json=payload) as response:
+        async with (sem or _dialog_semaphore):
+            session = await _get_http_session()
+            async with session.post(url, headers=headers, json=payload, timeout=req_timeout) as response:
                 if response.status == 200:
                     data = await response.json()
-                    raw_answer = data["result"]["alternatives"][0]["message"]["text"].strip()
-                   
-                    # Очищаем ответ от ролей и лимитов только для разговора
-                    if not system_override:
-                        answer = clean_gpt_reply(raw_answer)
-                        session_histories[session_id].append({"role": "assistant", "content": answer})
-                        log_info(f"GPT [{session_id}]: {answer}")
-                        return answer
-                   
-                    return raw_answer
-                else:
-                    err_text = await response.text()
-                    log_error(f"GPT Ошибка [{response.status}]: {err_text}")
-                    return "Я вас понял. Подскажите, на какой день вам удобнее записаться?"
+                    return data['result']['alternatives'][0]['message']['text']
+                error_text = await response.text()
+                log_error(f"[{session_id or '-'}] GPT ошибка {response.status}: {error_text}")
+                return None
     except Exception as e:
-        log_error(f"Исключение GPT: {e}")
-        return "Да, слушаю вас. Назовите, пожалуйста, марку вашего автомобиля."
+        log_error(f"[{session_id or '-'}] Ошибка при обращении к GPT: {e}")
+        return None
 
-async def get_gpt_response(history_messages):
-    if isinstance(history_messages, str):
-        return await ask_yandex_gpt(history_messages)
-    return await ask_yandex_gpt(history_messages[-1]["content"] if history_messages else "")
+async def ask_yandex_gpt(user_input: str, session_id: str, system_override: str = None):
+    _push(session_id, "user", _truncate_message(user_input))
+    active_system_prompt = system_override if system_override else SYSTEM_PROMPT
+    temperature = 0.2 if system_override else 0.3
+    max_tokens = 400 if system_override else 200
+    messages = [{"role": "system", "content": active_system_prompt}]
+    messages += [dict(m) for m in session_histories.get(session_id, [])]
+    t0 = time.monotonic()
+    raw = await _completion(messages, temperature, max_tokens,
+                            timeout=config.LIVE_GPT_TIMEOUT, session_id=session_id)
+    log_info(f"[{session_id}] GPT latency: {time.monotonic() - t0:.2f}s")
+    answer = clean_gpt_reply(raw) if raw else FALLBACK_PHRASE
+    if session_id in session_histories:
+        _push(session_id, "assistant", answer)
+    return answer
+
+def seed_greeting(session_id: str, greeting_text: str):
+    _push(session_id, "assistant", greeting_text)
+
+def get_session_history_formatted(session_id: str) -> list:
+    return [
+        {"role": ("client" if m["role"] == "user" else "manager"), "text": m["content"]}
+        for m in session_histories.get(session_id, [])
+    ]
+
+SUMMARY_SYSTEM = (
+    "Ты аналитик звонков в детейлинг-центр. По диалогу верни СТРОГО один JSON-объект, "
+    "без markdown и без ```: {\"summary\": \"краткое содержание звонка 1-2 предложения\", "
+    "\"client_name\": \"имя клиента или null\", \"intent\": \"запись|уточнение цен|консультация|другое\", "
+    "\"preferred_time\": \"желаемое время визита или null\", \"notes\": \"важные детали или null\"}"
+)
+
+def _parse_json_loose(raw: str) -> dict:
+    text = raw.strip()
+    text = re.sub(r'^```(?:json)?', '', text).rstrip('`').strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            data.setdefault("summary", text[:300])
+            return data
+    except Exception:
+        pass
+    m = re.search(r'\{.*\}', text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return {"summary": text[:300]}
+
+async def generate_call_summary(transcript: list, session_id: str = None) -> dict:
+    if not transcript:
+        return {"summary": "Разговор не состоялся."}
+    dialogue = "\n".join(f"{t['role']}: {t['text']}" for t in transcript)
+    raw = await _completion(
+        [{"role": "system", "content": SUMMARY_SYSTEM}, {"role": "user", "content": dialogue}],
+        0.1, 500, _summary_semaphore, timeout=config.SUMMARY_GPT_TIMEOUT, session_id=session_id,
+    )
+    if not raw:
+        return {"summary": "Не удалось проанализировать диалог."}
+    return _parse_json_loose(raw)
+
+def clear_session_context(session_id: str):
+    session_histories.pop(session_id, None)
+    session_timestamps.pop(session_id, None)
+
+async def cleanup_old_sessions():
+    """Фоновый клинер: удаляет сессии, неактивные дольше SESSION_TTL.
+    Защищает от утечек при сбоях звонков, когда clear_session_context не вызвался."""
+    # ИСПРАВЛЕНО: log_info принимает только один аргумент, используем f-string
+    log_info(f"Запущен фоновый клинер GPT-сессий (TTL={SESSION_TTL}с)")
+    while True:
+        await asyncio.sleep(600)
+        now = time.time()
+        old_sessions = [
+            sid for sid, ts in session_timestamps.items()
+            if now - ts > SESSION_TTL
+        ]
+        for sid in old_sessions:
+            clear_session_context(sid)
+            log_info(f"Удалена старая сессия {sid} (неактивна > {SESSION_TTL}с)")
