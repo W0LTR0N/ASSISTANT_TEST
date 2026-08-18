@@ -1,11 +1,9 @@
 fastapi==0.110.0
 uvicorn==0.28.0
 aiohttp==3.9.3
+aiofiles==23.2.1
 pydantic==2.6.4
 python-dotenv==1.0.1
-requests==2.31.0
-grpcio
-grpcio-tools
-yandexcloud
-protobuf
-pydub
+grpcio==1.60.0
+yandexcloud==0.284.0
+protobuf==4.25.1
