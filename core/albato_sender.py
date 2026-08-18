@@ -1,118 +1,120 @@
-import aiohttp
-import aiofiles
 import asyncio
 import json
-import os
-from datetime import datetime
-from config import ALBATO_WEBHOOK_URL, FAILED_LEADS_FILE
+import time
+import aiohttp
+import config
 from core.logger import log_info, log_error
 
 _albato_session = None
-_file_lock = asyncio.Lock()
+_send_lock = asyncio.Lock()
 
-async def _get_albato_session():
+
+async def _get_session():
     global _albato_session
     if _albato_session is None or _albato_session.closed:
-        _albato_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10.0))
+        _albato_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15.0))
     return _albato_session
+
 
 async def close_albato_session():
     global _albato_session
     if _albato_session is not None and not _albato_session.closed:
         await _albato_session.close()
 
-async def _save_failed_lead_locally(payload: dict):
-    """asyncio.Lock + aiofiles: защита от повреждения JSONL при concurrent writes."""
-    async with _file_lock:
-        try:
-            async with aiofiles.open(FAILED_LEADS_FILE, "a", encoding="utf-8") as f:
-                await f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                await f.flush()
-        except Exception as e:
-            log_error(f"Не удалось сохранить лид даже локально: {e}")
-    log_info(f"Лид сохранён локально в {FAILED_LEADS_FILE} (Albato была недоступна)")
 
-async def send_lead_to_albato(phone: str, summary: str, transcript: list, session_id: str, details: dict = None):
+def _clean(value) -> str:
+    """None -> пустая строка (Albato не любит null), остальное -> строка."""
+    if value is None:
+        return ""
+    return str(value)
+
+
+async def _post_lead(payload: dict) -> bool:
+    headers = {"Content-Type": "application/json"}
+    if config.WEBHOOK_SECRET and config.WEBHOOK_SECRET != "default_secret":
+        headers["X-Webhook-Secret"] = config.WEBHOOK_SECRET
+    try:
+        session = await _get_session()
+        async with session.post(config.ALBATO_WEBHOOK_URL, headers=headers, json=payload) as resp:
+            text = await resp.text()
+            if resp.status in (200, 201, 202, 204):
+                return True
+            log_error(f"Albato вернул статус {resp.status}: {text[:300]}")
+            return False
+    except Exception as e:
+        log_error(f"Ошибка отправки лида в Albato: {e}")
+        return False
+
+
+def _save_failed_lead(payload: dict):
+    try:
+        with open(config.FAILED_LEADS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        log_error("Лид сохранён в failed_leads.log для повторной отправки.")
+    except Exception as e:
+        log_error(f"Не удалось сохранить неудачный лид: {e}")
+
+
+async def send_lead_to_albato(phone: str, summary: str, transcript: list,
+                              session_id: str, details: dict):
+    """
+    Отправляет лид в Albato. Поля плоские — так Albato легко маппит их на CRM.
+    """
+    details = details or {}
     payload = {
-        "lead_id": session_id,
-        "phone": phone,
-        "session_id": session_id,
-        "summary": summary,
+        # обязательная база
+        "phone": _clean(phone),
+        "summary": _clean(summary),
         "transcript": transcript,
-        "details": details or {},
-        "timestamp": datetime.now().isoformat(),
+        "session_id": _clean(session_id),
+        "timestamp": int(time.time()),
+        # главное для CRM
+        "client_name": _clean(details.get("client_name")),
+        "car_model": _clean(details.get("car_model")),
+        "service": _clean(details.get("service")),
+        "preferred_time": _clean(details.get("preferred_time")),
+        "intent": _clean(details.get("intent")),
+        "notes": _clean(details.get("notes")),
     }
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
-        try:
-            session = await _get_albato_session()
-            async with session.post(ALBATO_WEBHOOK_URL, json=payload) as response:
-                if response.status in (200, 201, 202):
-                    log_info(f"[{session_id}] Лид успешно отправлен в Albato для {phone}")
-                    return
-                if response.status == 429:
-                    log_error(f"[{session_id}] Albato: лимит запросов, лид сохраняем локально для {phone}")
-                    await _save_failed_lead_locally(payload)
-                    return
-                err_body = await response.text()
-                log_error(f"[{session_id}] Ошибка Albato [{response.status}] (попытка {attempt}/{max_attempts}): {err_body}")
-        except Exception as e:
-            log_error(f"[{session_id}] Исключение Albato (попытка {attempt}/{max_attempts}): {e}")
-        if attempt < max_attempts:
-            await asyncio.sleep(1.5 * attempt)
+    async with _send_lock:
+        ok = await _post_lead(payload)
+        if ok:
+            log_info(f"[{session_id}] Лид успешно отправлен в Albato для {phone}")
+        else:
+            _save_failed_lead(payload)
 
-    log_error(f"[{session_id}] Не удалось отправить лид в Albato для {phone} после {max_attempts} попыток.")
-    await _save_failed_lead_locally(payload)
-
-async def _read_lines(path):
-    if not os.path.exists(path):
-        return []
-    async with aiofiles.open(path, "r", encoding="utf-8") as f:
-        return await f.readlines()
-
-async def _rewrite_file(path, lines):
-    if lines:
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            await f.write("\n".join(lines) + "\n")
-            await f.flush()
-    else:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
 
 async def resend_failed_leads():
+    """При старте доотправляет лиды, которые не ушли в прошлый раз."""
     try:
-        lines = await _read_lines(FAILED_LEADS_FILE)
-    except Exception as e:
-        log_error(f"Не удалось прочитать {FAILED_LEADS_FILE}: {e}")
+        with open(config.FAILED_LEADS_FILE, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except FileNotFoundError:
         return
+    except Exception as e:
+        log_error(f"Не удалось прочитать failed_leads.log: {e}")
+        return
+
     if not lines:
         return
 
-    log_info(f"Найдено {len(lines)} неотправленных лидов с прошлого запуска, пробуем отправить...")
-    still_failed = []
+    log_info(f"Найдено {len(lines)} неотправленных лидов, повторяем отправку...")
+    remaining = []
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
         try:
             payload = json.loads(line)
         except Exception:
-            log_error(f"В {FAILED_LEADS_FILE} повреждённая JSON-строка, оставляем для ручного разбора")
-            still_failed.append(line)
             continue
-        sent = False
-        try:
-            session = await _get_albato_session()
-            async with session.post(ALBATO_WEBHOOK_URL, json=payload) as response:
-                sent = response.status in (200, 201, 202)
-        except Exception:
-            sent = False
-        if not sent:
-            still_failed.append(line)
+        ok = await _post_lead(payload)
+        if ok:
+            log_info(f"Повторно отправлен старый лид для {payload.get('phone')}")
+        else:
+            remaining.append(line)
+        await asyncio.sleep(1)
 
-    await _rewrite_file(FAILED_LEADS_FILE, still_failed)
-    sent_count = len(lines) - len(still_failed)
-    if sent_count:
-        log_info(f"Повторно отправлено {sent_count} лидов, осталось не отправлено: {len(still_failed)}")
+    try:
+        with open(config.FAILED_LEADS_FILE, "w", encoding="utf-8") as f:
+            for line in remaining:
+                f.write(line + "\n")
+    except Exception as e:
+        log_error(f"Не удалось перезаписать failed_leads.log: {e}")
