@@ -435,7 +435,7 @@ class SIPWorker:
 
         asyncio.create_task(self.dialog_loop(call_id))
 
-        greeting_text = "Woltron Detailing, здравствуйте! Меня зовут Филипп, слушаю вас."
+        greeting_text = "Woltro+n Detailing, здравствуйте! Меня зовут Филипп, слушаю вас."
         seed_greeting(call_id, greeting_text)
         try:
             if session_data.get("tts_stub") is None:
