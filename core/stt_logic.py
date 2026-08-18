@@ -1,3 +1,16 @@
+import time
+import aiohttp
+import config
+from core.logger import log_info, log_error
+
+_stt_session = None
+
+async def _get_stt_session():
+    global _stt_session
+    if _stt_session is None or _stt_session.closed:
+        _stt_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10.0))
+    return _stt_session
+
 async def transcribe_audio_yandex(pcm_data: bytes, session_id: str) -> str:
     if not pcm_data:
         return ""
@@ -30,3 +43,8 @@ async def transcribe_audio_yandex(pcm_data: bytes, session_id: str) -> str:
     except Exception as e:
         log_error(f"[{session_id}] STT вызов упал ({time.monotonic() - t0:.2f}s): {e}")
         return ""
+
+async def close_stt_session():
+    global _stt_session
+    if _stt_session is not None and not _stt_session.closed:
+        await _stt_session.close()
