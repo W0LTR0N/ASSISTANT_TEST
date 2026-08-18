@@ -191,6 +191,11 @@ class SIPProtocol(asyncio.DatagramProtocol):
         return response
 
     def _handle_invite(self, msg, addr):
+        # Защита от сканеров: принимаем INVITE только с доверенных IP (Плюсофон).
+        # Если TRUSTED_SIP_IPS пуст — принимаем всех (старое поведение).
+        if TRUSTED_SIP_IPS and addr[0] not in TRUSTED_SIP_IPS:
+            log_error(f"INVITE с недоверенного IP {addr[0]} — вызов отклонён")
+            return
         log_info(f"Входящий вызов от {addr}")
         call_id = self._extract_header(msg, "Call-ID") or f"unknown-{random.randint(1000,9999)}"
         cseq = self._extract_header(msg, "CSeq") or "1 INVITE"
@@ -637,14 +642,18 @@ class SIPWorker:
         phone = session["phone"]
         try:
             transcript = get_session_history_formatted(call_id)
-            parsed_lead_data = await generate_call_summary(transcript, session_id=call_id)
-            await send_lead_to_albato(
-                phone=phone,
-                summary=parsed_lead_data.get("summary", ""),
-                transcript=transcript,
-                session_id=call_id,
-                details=parsed_lead_data,
-            )
+            client_spoke = any(t["role"] == "client" for t in transcript)
+            if not client_spoke:
+                log_info(f"[{call_id}] Разговора не было (клиент молчал) — лид в Albato НЕ отправлен")
+            else:
+                parsed_lead_data = await generate_call_summary(transcript, session_id=call_id)
+                await send_lead_to_albato(
+                    phone=phone,
+                    summary=parsed_lead_data.get("summary", ""),
+                    transcript=transcript,
+                    session_id=call_id,
+                    details=parsed_lead_data,
+                )
         except Exception as e:
             log_error(f"[{call_id}] Ошибка при обработке завершения звонка: {e}")
         finally:
