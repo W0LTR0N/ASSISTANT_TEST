@@ -9,7 +9,7 @@ import hashlib
 import audioop
 from config import *
 from core.logger import log_info, log_error
-from core.tts_logic import create_tts_channel, synthesize_speech_yandex
+from core.tts_logic import synthesize_speech, close_genvoice_session
 from core.stt_logic import transcribe_audio_yandex, close_stt_session
 from core.gpt_logic import (
     ask_yandex_gpt, seed_greeting, get_session_history_formatted,
@@ -17,6 +17,7 @@ from core.gpt_logic import (
     cleanup_old_sessions,
 )
 from core.albato_sender import send_lead_to_albato, resend_failed_leads, close_albato_session
+
 
 class RTPProtocol(asyncio.DatagramProtocol):
     def __init__(self, worker, call_id, phone, remote_ip, remote_port):
@@ -120,6 +121,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
         except Exception:
             pass
 
+
 class SIPProtocol(asyncio.DatagramProtocol):
     def __init__(self, worker):
         self.worker = worker
@@ -174,7 +176,6 @@ class SIPProtocol(asyncio.DatagramProtocol):
             log_error(f"REGISTER отклонён провайдером: {first_line}")
 
     def _send_error_response(self, code, reason, via_hdr, from_hdr, to_hdr, call_id, cseq, addr):
-        """Универсальная отправка SIP error response после 100 Trying."""
         if ";tag=" not in to_hdr.lower():
             to_hdr = f"{to_hdr};tag=woltron{random.randint(100000, 999999)}"
         response = (
@@ -243,9 +244,6 @@ class SIPProtocol(asyncio.DatagramProtocol):
             "transport": None,
             "phone": phone,
             "rtp_port": rtp_port,
-            "tts_channel": None,
-            "tts_stub": None,
-            "tts_fail_count": 0,
             "started_at": time.time(),
             "signaling_addr": addr,
             "from_hdr": from_hdr,
@@ -350,6 +348,7 @@ class SIPProtocol(asyncio.DatagramProtocol):
                     port = None
         return (media_ip or session_ip), port
 
+
 class SIPWorker:
     def __init__(self):
         self.host = PLUSOFON_SIP_HOST
@@ -435,14 +434,10 @@ class SIPWorker:
 
         asyncio.create_task(self.dialog_loop(call_id))
 
-        greeting_text = "Woltro+n Detailing, здравствуйте! Меня зовут Филипп, слушаю вас."
+        greeting_text = "Woltron Detailing, здравствуйте! Меня зовут Филипп, слушаю вас."
         seed_greeting(call_id, greeting_text)
         try:
-            if session_data.get("tts_stub") is None:
-                channel, stub = self._create_tts_stub_with_retry()
-                session_data["tts_channel"] = channel
-                session_data["tts_stub"] = stub
-            tts_pcm = await synthesize_speech_yandex(greeting_text, session_data["tts_stub"], self.folder_id, session_id=call_id)
+            tts_pcm = await synthesize_speech(greeting_text, session_id=call_id)
             if tts_pcm:
                 await protocol.send_audio_response(tts_pcm)
         except Exception as e:
@@ -542,12 +537,7 @@ class SIPWorker:
                 log_info(f"[{call_id}] Звонок завершён во время GPT, пропускаем TTS")
                 return
 
-            if session.get("tts_stub") is None:
-                channel, stub = self._create_tts_stub_with_retry()
-                session["tts_channel"] = channel
-                session["tts_stub"] = stub
-
-            tts_pcm = await synthesize_speech_yandex(reply_text, session["tts_stub"], self.folder_id, session_id=call_id)
+            tts_pcm = await synthesize_speech(reply_text, session_id=call_id)
             t3 = time.monotonic()
             log_info(f"[{call_id}] Latency STT={t1 - t0:.2f}s GPT={t2 - t1:.2f}s TTS={t3 - t2:.2f}s TOTAL={t3 - t0:.2f}s")
 
@@ -556,41 +546,13 @@ class SIPWorker:
                 return
 
             if tts_pcm:
-                session["tts_fail_count"] = 0
                 await proto.send_audio_response(tts_pcm)
-            else:
-                session["tts_fail_count"] += 1
-                if session["tts_fail_count"] >= 2:
-                    await self._refresh_tts_stub(call_id)
         except KeyError:
             log_info(f"[{call_id}] Звонок завершён во время обработки (race condition), пропускаем")
         except Exception as e:
             log_error(f"[{call_id}] Исключение в цикле диалога: {e}")
         finally:
             proto.is_processing = False
-
-    async def _refresh_tts_stub(self, call_id):
-        session = self.sessions.get(call_id)
-        if not session:
-            return
-        old_channel = session.get("tts_channel")
-        if old_channel:
-            try:
-                await old_channel.close()
-            except Exception:
-                pass
-        new_channel, new_stub = self._create_tts_stub_with_retry()
-        session["tts_channel"] = new_channel
-        session["tts_stub"] = new_stub
-        session["tts_fail_count"] = 0
-
-    def _create_tts_stub_with_retry(self, attempts: int = 2):
-        for i in range(attempts):
-            try:
-                return create_tts_channel()
-            except Exception as e:
-                log_error(f"Ошибка создания TTS канала (попытка {i+1}): {e}")
-        raise Exception("Не удалось создать TTS канал")
 
     async def send_bye(self, session):
         addr = session.get("signaling_addr")
@@ -664,11 +626,6 @@ class SIPWorker:
             except Exception:
                 pass
         self.release_port(session["rtp_port"])
-        if session.get("tts_channel"):
-            try:
-                await session["tts_channel"].close()
-            except Exception:
-                pass
         if send_bye:
             await self.send_bye(session)
 
@@ -835,7 +792,7 @@ a=sendrecv
                 log_error(f"Ошибка при завершении звонка {call_id}: {e}")
         if self.transport:
             self.transport.close()
-        for closer in (close_stt_session, close_gpt_session, close_albato_session):
+        for closer in (close_stt_session, close_gpt_session, close_albato_session, close_genvoice_session):
             try:
                 await closer()
             except Exception:
@@ -862,6 +819,7 @@ a=sendrecv
         log_info("SIP/RTP Движок запущен и ready.")
         while self.is_running:
             await asyncio.sleep(1)
+
 
 if __name__ == "__main__":
     worker = SIPWorker()
