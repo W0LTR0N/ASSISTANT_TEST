@@ -75,7 +75,7 @@ async def _completion(messages: list, temperature: float, max_tokens: int,
         "Authorization": f"Api-Key {config.YANDEX_GPT_API_KEY}",
         "Content-Type": "application/json",
     }
-    # ВАЖНО: YandexGPT требует поле "text", а не "content" (внутренне храним "content")
+    # ВАЖНО: YandexGPT требует поле "text", а не "content"
     yandex_messages = [{"role": m["role"], "text": m["content"]} for m in messages]
     payload = {
         "modelUri": f"gpt://{config.YANDEX_FOLDER_ID}/{config.YANDEX_GPT_MODEL}",
@@ -122,41 +122,62 @@ def get_session_history_formatted(session_id: str) -> list:
         for m in session_histories.get(session_id, [])
     ]
 
+# ===== Аналитика звонка для Albato =====
 SUMMARY_SYSTEM = (
-    "Ты аналитик звонков в детейлинг-центр. По диалогу верни СТРОГО один JSON-объект, "
-    "без markdown и без ```: {\"summary\": \"краткое содержание звонка 1-2 предложения\", "
-    "\"client_name\": \"имя клиента или null\", \"intent\": \"запись|уточнение цен|консультация|другое\", "
-    "\"preferred_time\": \"желаемое время визита или null\", \"notes\": \"важные детали или null\"}"
+    "Ты аналитик звонков детейлинг-центра. По диалогу менеджера и клиента верни СТРОГО один JSON-объект, "
+    "без markdown и без ```: "
+    "{\"summary\": \"краткое содержание звонка 1-2 предложения\", "
+    "\"client_name\": \"имя клиента или null, если не называл\", "
+    "\"car_model\": \"марка и модель автомобиля или null, если не называл\", "
+    "\"service\": \"услуга, которая интересует клиента (керамика, полировка, мойка, оклейка и т.п.) или null\", "
+    "\"preferred_time\": \"желаемое время визита или перезвона или null\", "
+    "\"intent\": \"запись|уточнение цен|консультация|другое\", "
+    "\"notes\": \"прочие важные детали или null\"}"
 )
+
+SUMMARY_FIELDS = ["summary", "client_name", "car_model", "service", "preferred_time", "intent", "notes"]
+_NULL_MARKERS = {"", "null", "none", "не указан", "не указано", "не называл", "нет", "-"}
 
 def _parse_json_loose(raw: str) -> dict:
     text = raw.strip()
     text = re.sub(r'^```(?:json)?', '', text).rstrip('`').strip()
+    data = {}
     try:
-        data = json.loads(text)
-        if isinstance(data, dict):
-            data.setdefault("summary", text[:300])
-            return data
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            data = parsed
     except Exception:
-        pass
-    m = re.search(r'\{.*\}', text, re.S)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
-    return {"summary": text[:300]}
+        m = re.search(r'\{.*\}', text, re.S)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = {}
+    if not data:
+        data = {"summary": text[:300]}
+
+    result = {}
+    for field in SUMMARY_FIELDS:
+        value = data.get(field)
+        if isinstance(value, str):
+            value = value.strip()
+            result[field] = value if value.lower() not in _NULL_MARKERS else None
+        else:
+            result[field] = None
+    if not result["summary"]:
+        result["summary"] = (text[:300] or "Не удалось проанализировать диалог.")
+    return result
 
 async def generate_call_summary(transcript: list, session_id: str = None) -> dict:
     if not transcript:
-        return {"summary": "Разговор не состоялся."}
+        return {f: None for f in SUMMARY_FIELDS} | {"summary": "Разговор не состоялся."}
     dialogue = "\n".join(f"{t['role']}: {t['text']}" for t in transcript)
     raw = await _completion(
         [{"role": "system", "content": SUMMARY_SYSTEM}, {"role": "user", "content": dialogue}],
         0.1, 500, _summary_semaphore, timeout=config.SUMMARY_GPT_TIMEOUT, session_id=session_id,
     )
     if not raw:
-        return {"summary": "Не удалось проанализировать диалог."}
+        return {f: None for f in SUMMARY_FIELDS} | {"summary": "Не удалось проанализировать диалог."}
     return _parse_json_loose(raw)
 
 def clear_session_context(session_id: str):
