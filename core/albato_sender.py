@@ -57,15 +57,21 @@ def _save_failed_lead(payload: dict):
 
 async def send_lead_to_albato(phone: str, summary: str, transcript: list,
                               session_id: str, details: dict):
-    """
-    Отправляет лид в Albato. Поля плоские — так Albato легко маппит их на CRM.
-    """
+    """Отправляет лид в Albato. Поля плоские — так Albato легко маппит их на CRM."""
     details = details or {}
+
+    # Весь диалог одним текстовым полем — для Telegram-сообщения в один клик
+    transcript_text = "\n".join(
+        f"{'👤' if t.get('role') == 'client' else '🤖'} {t.get('text', '')}"
+        for t in (transcript or [])
+    )
+
     payload = {
         # обязательная база
         "phone": _clean(phone),
         "summary": _clean(summary),
         "transcript": transcript,
+        "transcript_text": transcript_text,
         "session_id": _clean(session_id),
         "timestamp": int(time.time()),
         # главное для CRM
