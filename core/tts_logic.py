@@ -57,7 +57,6 @@ BACKGROUND_PCM, BACKGROUND_OK = _load_background()
 
 
 def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.05, speech_volume: float = 0.95) -> bytes:
-    """Пик-нормализация: 95% речь + 5% фон, если пики > 30000 — масштабируем вниз."""
     if not BACKGROUND_OK or not bg_pcm or not speech_pcm:
         return speech_pcm
     try:
@@ -90,8 +89,11 @@ def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.05, sp
         return speech_pcm
 
 
-def _decode_to_pcm8k(audio_bytes: bytes) -> bytes:
-    """Декодирует wav/mp3/ogg в raw PCM 8000 Hz 16-bit mono через miniaudio."""
+def _decode_to_pcm8k(audio_bytes: bytes, fmt: str) -> bytes:
+    """pcm_8000 — уже raw L16 8kHz mono, отдаём как есть.
+    Остальные (mp3_*, wav_*, opus_*) декодируем miniaudio и ресемплим в 8k."""
+    if fmt.startswith("pcm_8000"):
+        return audio_bytes
     decoded = miniaudio.decode(
         audio_bytes,
         nchannels=1,
@@ -102,7 +104,6 @@ def _decode_to_pcm8k(audio_bytes: bytes) -> bytes:
 
 
 async def _synthesize_genvoice(clean_text: str) -> bytes:
-    """Дёргает GenVoice API, возвращает сырые байты аудио (формат из конфига)."""
     headers = {
         "Authorization": f"Bearer {GENVOICE_API_KEY}",
         "Content-Type": "application/json",
@@ -122,7 +123,6 @@ async def _synthesize_genvoice(clean_text: str) -> bytes:
 
 
 async def synthesize_speech(text, session_id=None, timeout: float = 15.0) -> bytes:
-    """Возвращает PCM 8000 Hz 16-bit mono — формат для RTP-отправки."""
     clean_text = text.replace('*', '').replace('#', '').strip()
     if not clean_text:
         return b""
@@ -133,7 +133,7 @@ async def synthesize_speech(text, session_id=None, timeout: float = 15.0) -> byt
         if not audio_bytes:
             return b""
 
-        pcm = await asyncio.to_thread(_decode_to_pcm8k, audio_bytes)
+        pcm = await asyncio.to_thread(_decode_to_pcm8k, audio_bytes, GENVOICE_OUTPUT_FORMAT)
         if not pcm:
             return b""
 
