@@ -26,7 +26,7 @@ YANDEX_GPT_API_KEY = os.getenv("YANDEX_GPT_API_KEY", "")
 YANDEX_API_KEY = YANDEX_GPT_API_KEY  # тот же ключ для STT/TTS/GPT
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "")
 YANDEX_GPT_MODEL = os.getenv("YANDEX_GPT_MODEL", "yandexgpt-lite/latest")
-YANDEX_TTS_VOICE = os.getenv("YANDEX_TTS_VOICE", "ermil")
+YANDEX_TTS_VOICE = os.getenv("YANDEX_TTS_VOICE", "alyss")
 YANDEX_TTS_SPEED = _env_float("YANDEX_TTS_SPEED", 1.05)
 
 # ===== SIP (Plusofon) =====
