@@ -16,7 +16,7 @@ _dialog_semaphore = asyncio.Semaphore(5)
 _summary_semaphore = asyncio.Semaphore(2)
 _http_session = None
 HISTORY_LIMIT = 30
-SESSION_TTL = 1800  # 30 минут
+SESSION_TTL = 1800
 
 FALLBACK_PHRASE = "Простите, я вас не расслышал, повторите, пожалуйста."
 
@@ -75,10 +75,12 @@ async def _completion(messages: list, temperature: float, max_tokens: int,
         "Authorization": f"Api-Key {config.YANDEX_GPT_API_KEY}",
         "Content-Type": "application/json",
     }
+    # ВАЖНО: YandexGPT требует поле "text", а не "content" (внутренне храним "content")
+    yandex_messages = [{"role": m["role"], "text": m["content"]} for m in messages]
     payload = {
         "modelUri": f"gpt://{config.YANDEX_FOLDER_ID}/{config.YANDEX_GPT_MODEL}",
         "completionOptions": {"stream": False, "temperature": temperature, "maxTokens": str(max_tokens)},
-        "messages": messages,
+        "messages": yandex_messages,
     }
     req_timeout = aiohttp.ClientTimeout(total=timeout or config.SUMMARY_GPT_TIMEOUT)
     try:
@@ -162,9 +164,6 @@ def clear_session_context(session_id: str):
     session_timestamps.pop(session_id, None)
 
 async def cleanup_old_sessions():
-    """Фоновый клинер: удаляет сессии, неактивные дольше SESSION_TTL.
-    Защищает от утечек при сбоях звонков, когда clear_session_context не вызвался."""
-    # ИСПРАВЛЕНО: log_info принимает только один аргумент, используем f-string
     log_info(f"Запущен фоновый клинер GPT-сессий (TTL={SESSION_TTL}с)")
     while True:
         await asyncio.sleep(600)
