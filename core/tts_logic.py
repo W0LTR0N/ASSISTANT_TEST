@@ -6,8 +6,7 @@ import asyncio
 import aiohttp
 import miniaudio
 from config import (
-    YANDEX_API_KEY, YANDEX_FOLDER_ID,
-    GENVOICE_API_KEY, GENVOICE_VOICE_ID, GENVOICE_API_URL,
+    GENVOICE_API_KEY, GENVOICE_VOICE_ID, GENVOICE_API_URL, GENVOICE_OUTPUT_FORMAT,
 )
 from core.logger import log_info, log_error
 
@@ -91,14 +90,19 @@ def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.05, sp
         return speech_pcm
 
 
-def _mp3_to_pcm8k(mp3_bytes: bytes) -> bytes:
-    """Декодирует MP3 в raw PCM 8000 Hz 16-bit mono через miniaudio."""
-    decoded = miniaudio.decode(mp3_bytes, nchannels=1, sample_rate=8000, output_format=miniaudio.SampleFormat.SIGNED16)
+def _decode_to_pcm8k(audio_bytes: bytes) -> bytes:
+    """Декодирует wav/mp3/ogg в raw PCM 8000 Hz 16-bit mono через miniaudio."""
+    decoded = miniaudio.decode(
+        audio_bytes,
+        nchannels=1,
+        sample_rate=8000,
+        output_format=miniaudio.SampleFormat.SIGNED16,
+    )
     return bytes(decoded.samples)
 
 
 async def _synthesize_genvoice(clean_text: str) -> bytes:
-    """Дёргает GenVoice API, возвращает raw MP3-байты."""
+    """Дёргает GenVoice API, возвращает сырые байты аудио (формат из конфига)."""
     headers = {
         "Authorization": f"Bearer {GENVOICE_API_KEY}",
         "Content-Type": "application/json",
@@ -106,7 +110,7 @@ async def _synthesize_genvoice(clean_text: str) -> bytes:
     payload = {
         "voice_id": GENVOICE_VOICE_ID,
         "text": clean_text,
-        "output_format": "mp3",
+        "output_format": GENVOICE_OUTPUT_FORMAT,
     }
     session = await _get_genvoice_session()
     async with session.post(GENVOICE_API_URL, headers=headers, json=payload) as resp:
@@ -118,21 +122,18 @@ async def _synthesize_genvoice(clean_text: str) -> bytes:
 
 
 async def synthesize_speech(text, session_id=None, timeout: float = 15.0) -> bytes:
-    """
-    Универсальная точка синтеза.
-    Возвращает PCM 8000 Hz 16-bit mono — формат для RTP-отправки.
-    """
+    """Возвращает PCM 8000 Hz 16-bit mono — формат для RTP-отправки."""
     clean_text = text.replace('*', '').replace('#', '').strip()
     if not clean_text:
         return b""
 
     t0 = time.monotonic()
     try:
-        mp3_bytes = await asyncio.wait_for(_synthesize_genvoice(clean_text), timeout=timeout)
-        if not mp3_bytes:
+        audio_bytes = await asyncio.wait_for(_synthesize_genvoice(clean_text), timeout=timeout)
+        if not audio_bytes:
             return b""
 
-        pcm = await asyncio.to_thread(_mp3_to_pcm8k, mp3_bytes)
+        pcm = await asyncio.to_thread(_decode_to_pcm8k, audio_bytes)
         if not pcm:
             return b""
 
