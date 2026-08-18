@@ -4,6 +4,5 @@ aiohttp==3.9.3
 aiofiles==23.2.1
 pydantic==2.6.4
 python-dotenv==1.0.1
-grpcio==1.60.0
 yandexcloud==0.285.0
-protobuf==4.25.1
+miniaudio==1.61
