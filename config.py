@@ -31,6 +31,8 @@ YANDEX_GPT_MODEL = os.getenv("YANDEX_GPT_MODEL", "yandexgpt-lite/latest")
 GENVOICE_API_KEY = os.getenv("GENVOICE_API_KEY", "")
 GENVOICE_VOICE_ID = os.getenv("GENVOICE_VOICE_ID", "")
 GENVOICE_API_URL = os.getenv("GENVOICE_API_URL", "https://api.genvoice.ru/v1/api/tts")
+# Формат вывода GenVoice. Меняется через .env БЕЗ пересборки: wav / pcm / ogg — что примет их API
+GENVOICE_OUTPUT_FORMAT = os.getenv("GENVOICE_OUTPUT_FORMAT", "wav")
 
 # ===== SIP (Plusofon) =====
 PLUSOFON_SIP_HOST = os.getenv("PLUSOFON_SIP_HOST", "193320.voice.plusofon.ru")
@@ -40,6 +42,10 @@ PLUSOFON_SIP_PASSWORD = os.getenv("PLUSOFON_SIP_PASSWORD", "")
 # ===== Network =====
 PUBLIC_IP = os.getenv("PUBLIC_IP", "").strip()
 SIP_CAN_START = bool(PUBLIC_IP) and PUBLIC_IP != "127.0.0.1"
+
+# Белый список IP, с которых принимаем INVITE (Плюсофон).
+# Пусто = принимаем всех. Сканеры с левых IP будут отклонены.
+TRUSTED_SIP_IPS = [ip.strip() for ip in os.getenv("TRUSTED_SIP_IPS", "").split(",") if ip.strip()]
 
 # ===== Albato =====
 ALBATO_WEBHOOK_URL = os.getenv("ALBATO_WEBHOOK_URL", "")
