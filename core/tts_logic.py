@@ -3,15 +3,33 @@ import time
 import wave
 import audioop
 import asyncio
-import grpc
-from google.protobuf.json_format import ParseDict
-from yandex.cloud.ai.tts.v3 import tts_pb2, tts_service_pb2_grpc
-from config import YANDEX_API_KEY, YANDEX_FOLDER_ID, YANDEX_TTS_VOICE, YANDEX_TTS_SPEED
+import aiohttp
+import miniaudio
+from config import (
+    YANDEX_API_KEY, YANDEX_FOLDER_ID,
+    GENVOICE_API_KEY, GENVOICE_VOICE_ID, GENVOICE_API_URL,
+)
 from core.logger import log_info, log_error
 
 BACKGROUND_FILE = "background_noise.wav"
 BACKGROUND_PCM = b""
 BACKGROUND_OK = False
+
+_genvoice_session = None
+
+
+async def _get_genvoice_session():
+    global _genvoice_session
+    if _genvoice_session is None or _genvoice_session.closed:
+        _genvoice_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15.0))
+    return _genvoice_session
+
+
+async def close_genvoice_session():
+    global _genvoice_session
+    if _genvoice_session is not None and not _genvoice_session.closed:
+        await _genvoice_session.close()
+
 
 def _load_background():
     if not os.path.exists(BACKGROUND_FILE):
@@ -35,14 +53,12 @@ def _load_background():
         log_error(f"Ошибка загрузки {BACKGROUND_FILE}, фон отключён: {wave_err}")
         return b"", False
 
+
 BACKGROUND_PCM, BACKGROUND_OK = _load_background()
 
-def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.12, speech_volume: float = 0.88) -> bytes:
-    """
-    Peak normalization: снижаем громкость до сложения (88% + 12% = 100%).
-    Если после сложения есть пики > ±30000, масштабируем весь сигнал вниз,
-    чтобы гарантировать отсутствие клиппинга при lin2alaw.
-    """
+
+def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.05, speech_volume: float = 0.95) -> bytes:
+    """Пик-нормализация: 95% речь + 5% фон, если пики > 30000 — масштабируем вниз."""
     if not BACKGROUND_OK or not bg_pcm or not speech_pcm:
         return speech_pcm
     try:
@@ -74,81 +90,60 @@ def mix_background(speech_pcm: bytes, bg_pcm: bytes, bg_volume: float = 0.12, sp
         log_error(f"Ошибка микширования: {e}")
         return speech_pcm
 
-_GRPC_CHANNEL_OPTIONS = [
-    ('grpc.keepalive_time_ms', 30000),
-    ('grpc.keepalive_timeout_ms', 10000),
-    ('grpc.keepalive_permit_without_calls', True),
-    ('grpc.http2.max_pings_without_data', 0),
-]
 
-def create_tts_channel():
-    credentials = grpc.ssl_channel_credentials()
-    channel = grpc.aio.secure_channel('tts.api.cloud.yandex.net:443', credentials, options=_GRPC_CHANNEL_OPTIONS)
-    stub = tts_service_pb2_grpc.SynthesizerStub(channel)
-    return channel, stub
+def _mp3_to_pcm8k(mp3_bytes: bytes) -> bytes:
+    """Декодирует MP3 в raw PCM 8000 Hz 16-bit mono через miniaudio."""
+    decoded = miniaudio.decode(mp3_bytes, nchannels=1, sample_rate=8000, output_format=miniaudio.SampleFormat.SIGNED16)
+    return bytes(decoded.samples)
 
-def _build_request(clean_text: str) -> tts_pb2.UtteranceSynthesisRequest:
-    request_dict = {
-        "text": clean_text,
-        "outputAudioSpec": {"rawAudio": {"audioEncoding": "LINEAR16_PCM", "sampleRateHertz": 8000}},
-        "hints": [{"voice": YANDEX_TTS_VOICE}],
+
+async def _synthesize_genvoice(clean_text: str) -> bytes:
+    """Дёргает GenVoice API, возвращает raw MP3-байты."""
+    headers = {
+        "Authorization": f"Bearer {GENVOICE_API_KEY}",
+        "Content-Type": "application/json",
     }
-    if YANDEX_TTS_SPEED and abs(YANDEX_TTS_SPEED - 1.0) > 1e-6:
-        try:
-            d = dict(request_dict)
-            d["hints"] = request_dict["hints"] + [{"speed": YANDEX_TTS_SPEED}]
-            return ParseDict(d, tts_pb2.UtteranceSynthesisRequest())
-        except Exception:
-            log_error("TTS: hint speed не поддержан proto, синтезируем без speed.")
-    return ParseDict(request_dict, tts_pb2.UtteranceSynthesisRequest())
-
-async def _synthesize_stream(clean_text: str, stub, folder_id: str) -> bytes:
-    req = _build_request(clean_text)
-    metadata = (
-        ('x-folder-id', folder_id),
-        ('authorization', f'Api-Key {YANDEX_API_KEY}'),
-    )
-    speech_pcm = bytearray()
-    try:
-        stream = stub.UtteranceSynthesis(req, metadata=metadata)
-        async for response in stream:
-            if response.HasField("audio_chunk"):
-                speech_pcm.extend(response.audio_chunk.data)
-    except Exception as e:
-        log_error(f"TTS stream ошибка: {e}")
+    payload = {
+        "voice_id": GENVOICE_VOICE_ID,
+        "text": clean_text,
+        "output_format": "mp3",
+    }
+    session = await _get_genvoice_session()
+    async with session.post(GENVOICE_API_URL, headers=headers, json=payload) as resp:
+        if resp.status in (200, 201):
+            return await resp.read()
+        error_text = await resp.text()
+        log_error(f"GenVoice API ошибка {resp.status}: {error_text}")
         return b""
-    return bytes(speech_pcm)
 
-async def synthesize_speech_yandex(text, stub=None, folder_id=None, timeout: float = 8.0, session_id=None) -> bytes:
+
+async def synthesize_speech(text, session_id=None, timeout: float = 15.0) -> bytes:
+    """
+    Универсальная точка синтеза.
+    Возвращает PCM 8000 Hz 16-bit mono — формат для RTP-отправки.
+    """
     clean_text = text.replace('*', '').replace('#', '').strip()
     if not clean_text:
         return b""
-    if folder_id is None:
-        folder_id = YANDEX_FOLDER_ID
 
-    owns_channel = False
-    channel = None
     t0 = time.monotonic()
     try:
-        if stub is None:
-            channel, stub = create_tts_channel()
-            owns_channel = True
-        raw_speech = await asyncio.wait_for(_synthesize_stream(clean_text, stub, folder_id), timeout=timeout)
-        if not raw_speech:
+        mp3_bytes = await asyncio.wait_for(_synthesize_genvoice(clean_text), timeout=timeout)
+        if not mp3_bytes:
             return b""
-        result = mix_background(raw_speech, BACKGROUND_PCM)
+
+        pcm = await asyncio.to_thread(_mp3_to_pcm8k, mp3_bytes)
+        if not pcm:
+            return b""
+
+        result = mix_background(pcm, BACKGROUND_PCM)
         if session_id:
-            log_info(f"[{session_id}] TTS latency: {time.monotonic() - t0:.2f}s")
+            log_info(f"[{session_id}] TTS latency (GenVoice): {time.monotonic() - t0:.2f}s")
         return result
+
     except asyncio.TimeoutError:
-        log_error(f"[{session_id or '-'}] TTS: таймаут синтеза после {timeout}с, текст: '{clean_text[:60]}...'")
+        log_error(f"[{session_id or '-'}] GenVoice: таймаут синтеза после {timeout}с, текст: '{clean_text[:60]}...'")
         return b""
     except Exception as e:
-        log_error(f"[{session_id or '-'}] Исключение TTS v3 gRPC: {e}")
+        log_error(f"[{session_id or '-'}] GenVoice ошибка: {e}")
         return b""
-    finally:
-        if owns_channel and channel is not None:
-            try:
-                await channel.close()
-            except Exception:
-                pass
