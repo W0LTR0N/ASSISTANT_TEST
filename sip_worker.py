@@ -30,7 +30,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
         self.speaking = False
         self.pcm_buffer = bytearray()
         self.ssrc = random.randint(0, 0xFFFFFFFF)
-        self.sequence_number = random.randint(0,0xFFFF)
+        self.sequence_number = random.randint(0, 0xFFFF)
         self.timestamp = random.randint(0, 0xFFFFFFFF)
         self.last_packet_time = time.time()
         self.is_processing = False
@@ -194,17 +194,17 @@ class SIPProtocol(asyncio.DatagramProtocol):
         # Чёрный список: сканеры отклоняются молча, без логов и трат.
         if addr[0] in BLACKLIST_SIP_IPS:
             return
-        # Белый список Плюсофона проходит всегда.
-        # С неизвестного IP первый вызов принимается (вдруг новый адрес провайдера),
-        # повторы в течение 60 секунд блокируются как флуд.
+        # СТРОГИЙ режим: чужие IP не принимаются ВООБЩЕ — ноль трат.
+        # Раз в минуту пишем строку в лог, чтобы заметить новый адрес Плюсофона
+        # и добавить его в TRUSTED_SIP_IPS.
         if TRUSTED_SIP_IPS and addr[0] not in TRUSTED_SIP_IPS:
             now = time.time()
             last = self.worker._untrusted_last.get(addr[0], 0.0)
             if now - last < 60:
-                log_error(f"Флуд с недоверенного IP {addr[0]} — вызов отклонён")
                 return
             self.worker._untrusted_last[addr[0]] = now
-            log_info(f"Новый IP {addr[0]}: первый вызов принят, повторы в течение минуты блокируются")
+            log_error(f"INVITE с неизвестного IP {addr[0]} — ОТКЛОНЁН. Если это Плюсофон: добавь в TRUSTED_SIP_IPS")
+            return
         log_info(f"Входящий вызов от {addr}")
         call_id = self._extract_header(msg, "Call-ID") or f"unknown-{random.randint(1000,9999)}"
         cseq = self._extract_header(msg, "CSeq") or "1 INVITE"
