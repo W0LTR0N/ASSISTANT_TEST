@@ -191,11 +191,18 @@ class SIPProtocol(asyncio.DatagramProtocol):
         return response
 
     def _handle_invite(self, msg, addr):
-        # Защита от сканеров: принимаем INVITE только с доверенных IP (Плюсофон).
-        # Если TRUSTED_SIP_IPS пуст — принимаем всех (старое поведение).
+        # Защита от сканеров и флуда.
+        # Известные IP Плюсофона проходят без ограничений.
+        # С неизвестного IP первый вызов принимается (вдруг новый адрес провайдера),
+        # повторные в течение 60 секунд блокируются как флуд.
         if TRUSTED_SIP_IPS and addr[0] not in TRUSTED_SIP_IPS:
-            log_error(f"INVITE с недоверенного IP {addr[0]} — вызов отклонён")
-            return
+            now = time.time()
+            last = self.worker._untrusted_last.get(addr[0], 0.0)
+            if now - last < 60:
+                log_error(f"Флуд с недоверенного IP {addr[0]} — вызов отклонён")
+                return
+            self.worker._untrusted_last[addr[0]] = now
+            log_info(f"Новый IP {addr[0]}: первый вызов принят, повторы в течение минуты блокируются")
         log_info(f"Входящий вызов от {addr}")
         call_id = self._extract_header(msg, "Call-ID") or f"unknown-{random.randint(1000,9999)}"
         cseq = self._extract_header(msg, "CSeq") or "1 INVITE"
@@ -373,6 +380,7 @@ class SIPWorker:
             "cseq": 1,
         }
         self.auth_cache = None
+        self._untrusted_last = {}
 
     def reserve_port(self):
         total_ports = RTP_PORT_MAX - RTP_PORT_MIN + 1
