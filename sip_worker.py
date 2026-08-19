@@ -30,7 +30,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
         self.speaking = False
         self.pcm_buffer = bytearray()
         self.ssrc = random.randint(0, 0xFFFFFFFF)
-        self.sequence_number = random.randint(0, 0xFFFF)
+        self.sequence_number = random.randint(0,0xFFFF)
         self.timestamp = random.randint(0, 0xFFFFFFFF)
         self.last_packet_time = time.time()
         self.is_processing = False
@@ -191,10 +191,12 @@ class SIPProtocol(asyncio.DatagramProtocol):
         return response
 
     def _handle_invite(self, msg, addr):
-        # Защита от сканеров и флуда.
-        # Известные IP Плюсофона проходят без ограничений.
+        # Чёрный список: сканеры отклоняются молча, без логов и трат.
+        if addr[0] in BLACKLIST_SIP_IPS:
+            return
+        # Белый список Плюсофона проходит всегда.
         # С неизвестного IP первый вызов принимается (вдруг новый адрес провайдера),
-        # повторные в течение 60 секунд блокируются как флуд.
+        # повторы в течение 60 секунд блокируются как флуд.
         if TRUSTED_SIP_IPS and addr[0] not in TRUSTED_SIP_IPS:
             now = time.time()
             last = self.worker._untrusted_last.get(addr[0], 0.0)
